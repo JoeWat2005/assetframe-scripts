@@ -1,0 +1,6 @@
+fpdf2>=2.8
+pymupdf>=1.26
+
+# Optional - only needed to auto-upload Pro files to Cloudflare R2 (scripts/publish.py).
+# The free site and local builds do not need this.  pip install boto3
+# boto3>=1.34

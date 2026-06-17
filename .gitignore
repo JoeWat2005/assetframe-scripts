@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+
+# Engine working artifacts — regenerated every run (dirs auto-created on demand)
+data/
+reports/
+content/
+runs/
+ledger/sim/
+
+# Derived ledger products — rebuilt by calibrate.py / research_memory.py.
+# The source-of-truth ledger/outcome_ledger.csv stays tracked.
+ledger/calibration_map.json
+ledger/research_memory.json
+
+# Secrets — never commit (the template IS committed)
+.env
+.env.*
+!.env.example
+
+# Node (the sync-db.mjs publish helper)
+node_modules/

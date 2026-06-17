@@ -1,0 +1,69 @@
+{
+  "_comment": "AssetFrame asset universe — the single source of truth for WHAT the engine can run. Validated by scripts/validate_config.py (reuses taxonomy + sessions enums). provider_symbols.yahoo is the engine price feed; eodhd is the licensed cutover. roll_utc feeds intraday --roll-utc (22 for FX/futures/crypto, 0 for equities). Edit this file to add/enable/disable assets and set cadence/publish_policy.",
+  "assets": [
+    {
+      "id": "gbpusd", "name": "GBP/USD", "instrument": "British Pound / US Dollar", "ticker": "GBPUSD",
+      "provider_symbols": {"yahoo": "GBPUSD=X", "eodhd": "GBPUSD.FOREX"},
+      "asset_class": "fx", "session_profile": "fx_spot", "cadence": "weekday",
+      "timezone": "Europe/London", "roll_utc": 22, "related": "DX-Y.NYB,EURUSD=X",
+      "forecast_window": "next_liquid_session", "publish_policy": "approval_required",
+      "report_tier": "official", "enabled": true
+    },
+    {
+      "id": "gbpjpy", "name": "GBP/JPY", "instrument": "British Pound / Japanese Yen", "ticker": "GBPJPY",
+      "provider_symbols": {"yahoo": "GBPJPY=X", "eodhd": "GBPJPY.FOREX"},
+      "asset_class": "fx", "session_profile": "fx_spot", "cadence": "weekday",
+      "timezone": "Europe/London", "roll_utc": 22, "related": "JPY=X,EURJPY=X",
+      "forecast_window": "next_liquid_session", "publish_policy": "approval_required",
+      "report_tier": "official", "enabled": true
+    },
+    {
+      "id": "eurusd", "name": "EUR/USD", "instrument": "Euro / US Dollar", "ticker": "EURUSD",
+      "provider_symbols": {"yahoo": "EURUSD=X", "eodhd": "EURUSD.FOREX"},
+      "asset_class": "fx", "session_profile": "fx_spot", "cadence": "weekday",
+      "timezone": "Europe/London", "roll_utc": 22, "related": "DX-Y.NYB,GBPUSD=X",
+      "forecast_window": "next_liquid_session", "publish_policy": "approval_required",
+      "report_tier": "official", "enabled": true
+    },
+    {
+      "id": "btc", "name": "Bitcoin", "instrument": "Bitcoin / USD (aggregate spot)", "ticker": "BTC",
+      "provider_symbols": {"yahoo": "BTC-USD"},
+      "asset_class": "crypto", "session_profile": "crypto_24_7", "cadence": "daily",
+      "timezone": "UTC", "roll_utc": 22, "related": "ETH-USD",
+      "forecast_window": "rolling_24h", "publish_policy": "approval_required",
+      "report_tier": "official", "enabled": true
+    },
+    {
+      "id": "eth", "name": "Ethereum", "instrument": "Ethereum / USD", "ticker": "ETH",
+      "provider_symbols": {"yahoo": "ETH-USD"},
+      "asset_class": "crypto", "session_profile": "crypto_24_7", "cadence": "daily",
+      "timezone": "UTC", "roll_utc": 22, "related": "BTC-USD",
+      "forecast_window": "rolling_24h", "publish_policy": "approval_required",
+      "report_tier": "official", "enabled": true
+    },
+    {
+      "id": "aapl", "name": "Apple", "instrument": "Apple Inc.", "ticker": "AAPL",
+      "provider_symbols": {"yahoo": "AAPL", "eodhd": "AAPL.US"},
+      "asset_class": "equity", "session_profile": "us_equity_rth", "cadence": "trading_day",
+      "timezone": "America/New_York", "roll_utc": 0, "related": "QQQ,^VIX",
+      "forecast_window": "next_regular_session", "publish_policy": "approval_required",
+      "report_tier": "official", "enabled": true
+    },
+    {
+      "id": "gold", "name": "Gold", "instrument": "Gold (COMEX front-month future)", "ticker": "GOLD",
+      "provider_symbols": {"yahoo": "GC=F"},
+      "asset_class": "commodity", "session_profile": "cme_futures", "cadence": "weekday_or_market_open",
+      "timezone": "America/New_York", "roll_utc": 22, "related": "DX-Y.NYB,SI=F",
+      "forecast_window": "next_liquid_session", "publish_policy": "approval_required",
+      "report_tier": "official", "enabled": true
+    },
+    {
+      "id": "es", "name": "S&P 500 E-mini", "instrument": "S&P 500 E-mini Future", "ticker": "ES",
+      "provider_symbols": {"yahoo": "ES=F"},
+      "asset_class": "index", "session_profile": "cme_futures", "cadence": "trading_day",
+      "timezone": "America/New_York", "roll_utc": 22, "related": "^VIX,^VVIX,^VIX3M",
+      "forecast_window": "next_regular_session", "publish_policy": "approval_required",
+      "report_tier": "official", "enabled": true
+    }
+  ]
+}

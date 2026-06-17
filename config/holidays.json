@@ -1,0 +1,5 @@
+{
+  "_comment": "Market holiday table for scripts/calendar_rules.py. Keys are calendar groups: US (NYSE/Nasdaq/CME) and UK (LSE); dates are YYYY-MM-DD in the venue's local calendar. INCOMPLETE — seeded only with verified fixed-date + well-known 2026 closures. Add the remaining floating holidays (US: MLK, Presidents, Good Friday, Memorial, Labor; UK: spring/summer bank holidays) before relying on holiday skips, or upgrade calendar_rules.py to the `exchange_calendars` library. The weekend rule + intraday freshness + the approval gate are the backstops until then.",
+  "US": ["2026-01-01", "2026-06-19", "2026-07-03", "2026-11-26", "2026-12-25"],
+  "UK": ["2026-01-01", "2026-12-25", "2026-12-28"]
+}

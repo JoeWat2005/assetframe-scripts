@@ -1,0 +1,12 @@
+{
+  "name": "assetframe-script",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AssetFrame forecast engine — generation, scoring, ledger, and publish. The one Node helper (sync-db.mjs) writes the catalog + track record into Neon; everything else is Python.",
+  "scripts": {
+    "sync-db": "node scripts/sync-db.mjs"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.1.0"
+  }
+}
