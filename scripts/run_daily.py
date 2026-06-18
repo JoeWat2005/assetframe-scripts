@@ -16,11 +16,17 @@ Run modes:
   generate_only  generate due assets; skip scoring
   production     score + refresh + generate  (publish/approval wired in Phase 2)
 
-Phase-1 note: the research brief is operator-written today. When an asset has no
-data/briefs/<TICKER>_research_brief.json, generation records status "needs_brief" and
-skips it (Phase 2 wires brief_writer.py + critic.py + the publish-hidden approval gate
-here). Idempotent: deterministic run_id/report_id + the scorer's dedup guard mean a
-re-run never double-scores or double-appends.
+Brief authoring: when an asset has no data/briefs/<TICKER>_research_brief.json and the
+mode generates, brief_writer.py authors one (Anthropic API + web_search) and critic.py
+adversarially reviews it. On approve the brief now exists and the pipeline continues; a
+critic 'revise' triggers ONE bounded re-author; 'reject'/'stand_aside' skip the asset
+(status brief_rejected / brief_stand_aside). If ANTHROPIC_API_KEY is unset, the SDK is
+missing, or the writer fails, the asset degrades to "needs_brief" (operator-written
+fallback) — a keyless run never hard-stops. An operator-written brief already present is
+used as-is. Set ASSETFRAME_AUTHOR_BRIEFS=0 to force the legacy operator-only behaviour.
+Each manifest job carries a token_cost block (writer + critic tokens/web-searches/$).
+Idempotent: deterministic run_id/report_id + the scorer's dedup guard mean a re-run never
+double-scores or double-appends.
 
 Usage:
   python scripts/run_daily.py [--universe config/assets.json] [--asset <id>]
@@ -28,6 +34,7 @@ Usage:
         [--date YYYY-MM-DD] [--as-of "YYYY-MM-DD HH:MM"] [--workers 4] [--no-render]
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -46,7 +53,16 @@ MODES = ("dry_run", "score_only", "generate_only", "production")
 PRED_DIR = ROOT / "data" / "predictions"
 BRIEF_DIR = ROOT / "data" / "briefs"
 MEMPACK_DIR = ROOT / "data" / "memory_packs"
+RESEARCH_DIR = ROOT / "data" / "research"
+SOCIAL_DIR = ROOT / "data" / "social"
 LEDGER = ROOT / "ledger" / "outcome_ledger.csv"
+
+# Autonomous brief authoring (brief_writer.py + critic.py). Only engaged when a brief
+# is MISSING and the mode generates; a keyless run or a writer failure degrades back to
+# the operator-written "needs_brief" path so the engine never hard-stops on the AI step.
+BRIEF_AUTHORING = os.environ.get("ASSETFRAME_AUTHOR_BRIEFS", "1") != "0"
+WRITER_TIMEOUT = 600        # web_search authoring can be slow
+CRITIC_TIMEOUT = 300
 
 try:
     from zoneinfo import ZoneInfo
@@ -57,14 +73,35 @@ except Exception:                       # pragma: no cover
 
 def _run(cmd, timeout=180):
     """Run a child script; return (ok, stdout, stderr). Never raises."""
+    ok, _rc, out, err = _run_rc(cmd, timeout=timeout)
+    return ok, out, err
+
+
+def _run_rc(cmd, timeout=180):
+    """Like _run but also returns the exit CODE — needed by the critic, which signals
+    its verdict via the exit code (0 approve/revise, 2 reject/stand_aside) as well as
+    JSON. Returns (ok, returncode, stdout, stderr). Never raises."""
     try:
         p = subprocess.run([sys.executable] + cmd, cwd=str(ROOT), capture_output=True,
                            text=True, timeout=timeout)
-        return p.returncode == 0, p.stdout, p.stderr
+        return p.returncode == 0, p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
-        return False, "", f"timeout after {timeout}s"
+        return False, -1, "", f"timeout after {timeout}s"
     except Exception as ex:
-        return False, "", str(ex)[:200]
+        return False, -1, "", str(ex)[:200]
+
+
+def _parse_last_json(text):
+    """Best-effort: parse the last JSON object printed on a child's stdout."""
+    if not text:
+        return {}
+    i = text.rfind("{")
+    if i == -1:
+        return {}
+    try:
+        return json.loads(text[i:])
+    except Exception:
+        return {}
 
 
 def parse_args(argv):
@@ -155,6 +192,162 @@ def score_step(now, tickers=None):
     return {"scored": scored, "skipped": skipped, "errors": errors, "memory_refresh": refresh}
 
 
+# --------------------------------------------------------------- brief authoring
+def author_brief_step(asset, brief_path):
+    """Autonomously author + adversarially review the research brief.
+
+    Flow (matches the V2 'AI drafts, AI critiques, Python validates' design):
+      1. brief_writer.py  -> writes brief_path (web_search-enabled; self-validates schema)
+      2. critic.py        -> adversarial verdict (exit 0 approve/revise, 2 reject/stand_aside)
+      3. on 'revise': ONE bounded re-author with the critic's issues as guidance, then
+         re-critique once.
+      4. on 'approve' (or 'revise' that the critic then accepts): leave the brief in
+         place so the pipeline continues to scaffold.
+      5. on 'reject'/'stand_aside': the brief is NOT used this run (we remove an
+         authored-but-rejected file so a stale draft can't leak into the next stage).
+
+    Returns a result dict consumed by generate_asset:
+      {"status": "authored"|"brief_rejected"|"brief_stand_aside"|"writer_unavailable"|
+                 "brief_failed",
+       "decision": <critic decision or None>, "critic_summary": str,
+       "issues": [...], "token_cost": {...}}
+    Never raises — on any failure it returns a status that degrades to needs_brief.
+    """
+    tk = asset["ticker"]
+    res = {"status": "brief_failed", "decision": None, "critic_summary": "",
+           "issues": [], "token_cost": {"writer": [], "critic": []}}
+
+    analysis = ROOT / "data" / "analysis" / f"{tk}_analysis.json"
+    mempack = MEMPACK_DIR / f"{tk}_memory_pack.json"
+    research = RESEARCH_DIR / f"{tk}_research_pack.json"
+    social = SOCIAL_DIR / f"{tk}_social_pack.json"
+    if not analysis.exists() or not mempack.exists():
+        res["status"] = "brief_failed"
+        res["critic_summary"] = "missing analysis or memory_pack input for the writer"
+        return res
+
+    def _rel(p):
+        return str(p.relative_to(ROOT))
+
+    def _write(guidance=None):
+        cmd = ["scripts/brief_writer.py", tk, "--analysis", _rel(analysis),
+               "--memory-pack", _rel(mempack), "--out", _rel(brief_path)]
+        if research.exists():
+            cmd += ["--research", _rel(research)]
+        if social.exists():
+            cmd += ["--social", _rel(social)]
+        if guidance:
+            cmd += ["--guidance", guidance]
+        ok, rc, out, err = _run_rc(cmd, timeout=WRITER_TIMEOUT)
+        res["token_cost"]["writer"].append(_parse_last_json(out) or {"error": (err or "")[-160:]})
+        # exit 3 == ANTHROPIC_API_KEY unset / SDK missing / API error -> degrade gracefully
+        return ok, rc, (err or out)
+
+    def _critique():
+        cmd = ["scripts/critic.py", _rel(brief_path), "--asset", tk, "--analysis", _rel(analysis)]
+        if research.exists():
+            cmd += ["--research", _rel(research)]
+        ok, rc, out, err = _run_rc(cmd, timeout=CRITIC_TIMEOUT)
+        verdict = _parse_last_json(out)
+        res["token_cost"]["critic"].append(verdict.get("_telemetry") or {"error": (err or "")[-160:]})
+        return verdict, rc, (err or out)
+
+    # 1. author
+    ok, rc, msg = _write()
+    if not ok:
+        if rc == 3:           # keyless / SDK missing / API error -> operator-written fallback
+            res["status"] = "writer_unavailable"
+        res["critic_summary"] = (msg or "")[-200:]
+        return res
+
+    # 2. critique
+    verdict, _crc, cmsg = _critique()
+    decision = verdict.get("decision")
+    res["decision"] = decision
+    res["critic_summary"] = verdict.get("summary", "") or (cmsg or "")[-200:]
+    res["issues"] = verdict.get("issues", [])
+    if not decision:          # critic API/parse failure -> can't trust it; degrade
+        res["status"] = "writer_unavailable"
+        return res
+
+    # 3. bounded revise loop (exactly one repair pass)
+    if decision == "revise":
+        guidance = _issues_to_guidance(verdict)
+        ok, rc, msg = _write(guidance=guidance)
+        if not ok:
+            res["status"] = "writer_unavailable" if rc == 3 else "brief_failed"
+            res["critic_summary"] = (msg or res["critic_summary"])[-200:]
+            return res
+        verdict, _crc, cmsg = _critique()
+        decision = verdict.get("decision")
+        res["decision"] = decision
+        res["critic_summary"] = verdict.get("summary", "") or res["critic_summary"]
+        res["issues"] = verdict.get("issues", [])
+
+    # 4/5. resolve on the final decision
+    if decision in ("approve", "revise"):
+        res["status"] = "authored"
+    elif decision == "stand_aside":
+        res["status"] = "brief_stand_aside"
+        res["critic_summary"] = verdict.get("stand_aside_reason") or res["critic_summary"]
+        _safe_unlink(brief_path)
+    else:                     # reject (or anything unexpected after the loop)
+        res["status"] = "brief_rejected"
+        _safe_unlink(brief_path)
+    return res
+
+
+def _issues_to_guidance(verdict):
+    """Render the critic's issues into a compact guidance string for the re-author."""
+    lines = []
+    for it in verdict.get("issues", []):
+        if isinstance(it, dict):
+            lines.append(f"[{it.get('severity','issue')}] {it.get('field','')}: "
+                         f"{it.get('problem','')} -> {it.get('fix','')}".strip())
+        else:
+            lines.append(str(it))
+    for adj in verdict.get("confidence_adjustments", []):
+        lines.append(f"[conviction] {adj}")
+    return "\n".join(lines) or (verdict.get("summary", ""))
+
+
+def _safe_unlink(path):
+    try:
+        Path(path).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _sum_token_cost(token_cost):
+    """Roll the writer + critic per-call telemetry into one per-asset cost summary
+    for the manifest record."""
+    tin = tout = web = 0
+    usd = 0.0
+    for call in (token_cost.get("writer", []) + token_cost.get("critic", [])):
+        if not isinstance(call, dict):
+            continue
+        tin += call.get("input_tokens", 0) or 0
+        tout += call.get("output_tokens", 0) or 0
+        web += call.get("web_searches", 0) or 0
+        usd += call.get("est_cost_usd", 0.0) or 0.0
+    return {"input_tokens": tin, "output_tokens": tout, "web_searches": web,
+            "est_cost_usd": round(usd, 4)}
+
+
+def _total_token_cost(summaries):
+    """Sum per-asset token_cost summaries into a run-level total for the manifest."""
+    tot = {"input_tokens": 0, "output_tokens": 0, "web_searches": 0, "est_cost_usd": 0.0}
+    for s in summaries:
+        if not isinstance(s, dict):
+            continue
+        tot["input_tokens"] += s.get("input_tokens", 0) or 0
+        tot["output_tokens"] += s.get("output_tokens", 0) or 0
+        tot["web_searches"] += s.get("web_searches", 0) or 0
+        tot["est_cost_usd"] += s.get("est_cost_usd", 0.0) or 0.0
+    tot["est_cost_usd"] = round(tot["est_cost_usd"], 4)
+    return tot
+
+
 # --------------------------------------------------------------- generate step
 def generate_asset(asset, now, no_render):
     """Deterministic per-asset pipeline: intraday -> memory_pack -> [brief] -> scaffold
@@ -162,7 +355,9 @@ def generate_asset(asset, now, no_render):
     t0 = time.time()
     tk = asset["ticker"]
     rec = {"asset_id": asset["id"], "ticker": tk, "asset_class": asset["asset_class"],
-           "report_id": None, "status": "error", "stages": {}, "errors": []}
+           "report_id": None, "status": "error", "stages": {}, "errors": [],
+           "token_cost": {"input_tokens": 0, "output_tokens": 0, "web_searches": 0,
+                          "est_cost_usd": 0.0}}
 
     def stage(name, cmd, timeout=180):
         ok, out, err = _run(cmd, timeout=timeout)
@@ -190,10 +385,36 @@ def generate_asset(asset, now, no_render):
     except Exception as ex:
         rec["stages"]["memory_pack"] = "failed"; rec["errors"].append({"memory_pack": str(ex)[:160]})
 
-    # 3. brief — Phase 1: operator-written. Phase 2 wires brief_writer.py + critic.py here.
+    # 3. brief — autonomously authored + adversarially reviewed. An operator-written
+    # brief (already present) is honoured as-is. When the brief is MISSING and brief
+    # authoring is enabled, brief_writer.py + critic.py run here; on approve the brief
+    # now exists and the pipeline continues. A keyless run, a writer failure, a reject,
+    # or a stand-aside all degrade gracefully (no scaffold) with a recorded reason.
     brief = BRIEF_DIR / f"{tk}_research_brief.json"
+    rec["brief_source"] = "operator"
     if not brief.exists():
-        rec["status"] = "needs_brief"; rec["duration_s"] = round(time.time() - t0, 1); return rec
+        if not BRIEF_AUTHORING:
+            rec["status"] = "needs_brief"; rec["duration_s"] = round(time.time() - t0, 1); return rec
+        BRIEF_DIR.mkdir(parents=True, exist_ok=True)
+        ab = author_brief_step(asset, brief)
+        rec["brief_source"] = "authored"
+        rec["brief_token_cost"] = ab["token_cost"]
+        rec["token_cost"] = _sum_token_cost(ab["token_cost"])
+        if ab.get("decision"):
+            rec["critic_decision"] = ab["decision"]
+        if ab.get("critic_summary"):
+            rec["critic_summary"] = ab["critic_summary"]
+        if ab.get("issues"):
+            rec["critic_issues"] = ab["issues"]
+        if ab["status"] != "authored":
+            # writer_unavailable/brief_failed -> needs_brief (operator can supply one);
+            # brief_rejected/brief_stand_aside -> skip this asset, record why.
+            rec["status"] = ("needs_brief" if ab["status"] in ("writer_unavailable", "brief_failed")
+                             else ab["status"])
+            rec["stages"]["brief"] = "authored" if ab.get("decision") else "skipped"
+            rec["duration_s"] = round(time.time() - t0, 1)
+            return rec
+        rec["stages"]["brief"] = "authored"
 
     # 4. scaffold (payload + predictions + deterministic confidence)
     ok, _ = stage("scaffold", ["scripts/scaffold_payload.py", tk,
@@ -258,6 +479,9 @@ def main():
         manifest["jobs"] = sorted(jobs, key=lambda r: r["asset_id"])
         manifest["generated"] = sum(1 for j in jobs if j["status"] in ("generated", "forecast_only"))
         manifest["needs_brief"] = [j["ticker"] for j in jobs if j["status"] == "needs_brief"]
+        manifest["brief_rejected"] = [j["ticker"] for j in jobs if j["status"] == "brief_rejected"]
+        manifest["brief_stand_aside"] = [j["ticker"] for j in jobs if j["status"] == "brief_stand_aside"]
+        manifest["token_cost"] = _total_token_cost(j.get("token_cost") for j in jobs)
 
     # always write the manifest (dry_run writes the plan only)
     run_dir = ROOT / "runs" / run_date

@@ -1,6 +1,12 @@
 fpdf2>=2.8
 pymupdf>=1.26
 
+# Autonomous brief authoring + adversarial critic (scripts/brief_writer.py, critic.py).
+# Uses the Anthropic Messages API with the server-side web_search tool. A keyless run
+# degrades gracefully to the operator-written brief flow, so this is only required when
+# ASSETFRAME_AUTHOR_BRIEFS is on AND ANTHROPIC_API_KEY is set.
+anthropic>=0.40
+
 # Optional - only needed to auto-upload Pro files to Cloudflare R2 (scripts/publish.py).
 # The free site and local builds do not need this.  pip install boto3
 # boto3>=1.34
