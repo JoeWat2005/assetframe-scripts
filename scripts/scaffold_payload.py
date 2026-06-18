@@ -108,6 +108,27 @@ def to_london(utc_str):
     return f"{loc:%a} {loc.day} {loc:%b %Y %H:%M} UK"
 
 
+def to_display(utc_str):
+    """'YYYY-MM-DD HH:MM' UTC -> 'Mon 15 Jun 2026 14:30 UTC (15:30 BST)' -
+    UTC primary (standard) with the London local time + abbrev alongside."""
+    try:
+        u = datetime.strptime(utc_str[:16], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return utc_str
+    loc = _to_london_dt(utc_str)
+    base = f"{u:%a} {u.day} {u:%b %Y %H:%M} UTC"
+    if loc is None:
+        return base
+    if _LONDON:
+        ld = f"{loc:%H:%M %Z}"  # zoneinfo gives the correct BST/GMT abbrev
+    else:
+        # no tz database: approximate UK clock (matches to_london's fallback) and
+        # label by season so winter never gets mislabelled as BST
+        abbr = "BST" if 3 <= u.month <= 10 else "GMT"
+        ld = f"{loc:%H:%M} {abbr}"
+    return f"{base} ({ld})"
+
+
 def _ld_short(utc_str):
     loc = _to_london_dt(utc_str)
     return f"{loc:%a %H:%M} UK" if loc else utc_str
@@ -309,25 +330,25 @@ def assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
         "asset_class": brief.get("asset_class_label", asset_class),
         "asset_class_key": asset_class,
         "venue": brief.get("venue", session.get("market_session_type", "")),
-        "exchange_timezone": analysis.get("timezone", ""), "report_timezone": "Europe/London",
+        "exchange_timezone": analysis.get("timezone", ""), "report_timezone": "UTC",
         "report_date": report_date,
         "prediction_window_start_utc": win_s, "prediction_window_end_utc": win_e,
-        "prediction_window_start_report_tz": to_london(win_s),
-        "prediction_window_end_report_tz": to_london(win_e),
+        "prediction_window_start_report_tz": to_display(win_s),
+        "prediction_window_end_report_tz": to_display(win_e),
         "market_session_type": session["market_session_type"],
         "market_open_utc": session.get("market_open_utc", ""),
         "market_close_utc": session.get("market_close_utc", ""),
         "next_maintenance_break": session.get("next_maintenance_break", ""),
         "next_major_event": brief.get("next_major_event", "None scheduled in-window."),
         "latest_bar_timestamp_utc": last_ts,
-        "latest_bar_timestamp_report_tz": to_london(last_ts),
+        "latest_bar_timestamp_report_tz": to_display(last_ts),
         "latest_bar_complete": True,
         "data_provider": (analysis.get("provider") or {}).get("hourly", "yahoo"),
         "cross_check_provider": brief.get("cross_check", "single-source (no independent cross-check this run)"),
         "price_type": brief.get("price_type", "session close"),
         "contract_month": brief.get("contract_month", "n/a"),
         "adjustment_type": "none",
-        "last_price": brief.get("last_price_note") or f"{last_price} (last completed bar {to_london(last_ts)})",
+        "last_price": brief.get("last_price_note") or f"{last_price} (last completed bar {to_display(last_ts)})",
         "status": brief["status"], "risk_rating": brief["risk"],
         "research_view": brief.get("research_view", ""),
         "primary_bias": brief.get("primary_bias", brief.get("directional_view", "")),

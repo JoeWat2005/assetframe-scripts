@@ -28,4 +28,4 @@ Label every important figure with its source and timestamp, and mark it live, de
 - Output per run: `reports/YYYY-MM-DD/<INSTRUMENT>/` → `free.pdf`, `pro.pdf`, `free.html`, `pro.html`, `metadata.json`, `preview.png`.
 - Data layout: `data/candles/` (hourly + daily CSVs) · `data/analysis/` (engine JSON) · `data/payloads/` (canonical report payloads) · `data/predictions/` (registered predictions awaiting scoring).
 - Outcome ledger: `ledger/outcome_ledger.csv` — append-only; never edit or rewrite existing rows, never score an incomplete window.
-- Timezone for filenames and report timestamps: Europe/London.
+- Timezone: scheduling, filenames and `report_date` are UTC (`report_date` = the UTC date of the prediction-window start); reports display UTC with London (BST/GMT) shown alongside; per-asset timezone/roll/holiday/session math stays exchange-local.

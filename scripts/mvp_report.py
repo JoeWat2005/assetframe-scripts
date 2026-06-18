@@ -1361,10 +1361,12 @@ def build_metadata(p, qa, free_warn, pro_warn, qa_warns=None):
     meta.setdefault("tagline", TAGLINE)
     meta.setdefault("product_free", "AssetFrame Snapshot")
     meta.setdefault("product_pro", "AssetFrame Pro")
-    meta["report_timezone"] = "Europe/London"
+    meta["report_timezone"] = "UTC"
     meta["generated_at_utc"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     if LONDON:
-        meta["generated_at_report_tz"] = now.astimezone(LONDON).strftime("%Y-%m-%d %H:%M %Z")
+        ld = now.astimezone(LONDON)
+        meta["generated_at_report_tz"] = (now.strftime("%Y-%m-%d %H:%M UTC")
+                                          + ld.strftime(" (%H:%M %Z)"))
     meta["indicator_warmup_confirmed"] = not free_warn and not pro_warn
     meta["partial_indicators_hidden"] = True
     if free_warn or pro_warn:
