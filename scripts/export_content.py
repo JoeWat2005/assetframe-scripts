@@ -33,6 +33,30 @@ except Exception:                       # pragma: no cover - standalone fallback
         return v
 
 
+def _publish_policy_by_ticker():
+    """Map UPPER(ticker) -> publish_policy from config/assets.json. Editions match their
+    asset by ticker (the report slug/metadata ticker is the asset's ticker, e.g. "GBPUSD").
+    Prefer config_loader (validated + normalized defaults); fall back to raw JSON so a
+    transient validation hiccup can't break the export — an unknown ticker is then treated
+    as approval_required by the caller (fail safe, never auto-expose)."""
+    out = {}
+    cfg = ROOT / "config" / "assets.json"
+    try:
+        import config_loader
+        assets = config_loader.load_assets(cfg)
+    except Exception:                       # pragma: no cover - standalone fallback
+        try:
+            raw = json.loads(cfg.read_text(encoding="utf-8-sig"))
+            assets = raw.get("assets", raw) if isinstance(raw, dict) else raw
+        except Exception:
+            assets = []
+    for a in assets or []:
+        tkr = (a.get("ticker") or "").strip().upper()
+        if tkr:
+            out[tkr] = a.get("publish_policy", "approval_required")
+    return out
+
+
 def _norm_asset_class(value):
     """Best-effort map a free-text/ledger asset_class onto a taxonomy key, else "".
     The ledger already stores taxonomy keys in `asset_class`; this only guards typos
@@ -82,6 +106,10 @@ def _agg_rows(rows, key_fn):
 
 
 def load_catalog(reports_dir, include_dev, since=None):
+    # Approval gate: an edition lands hidden=true unless its asset opts into publish_policy
+    # "auto". Match by ticker (fall back to slug); an asset the config doesn't know stays
+    # hidden (fail safe — never auto-expose an unknown).
+    policy_by_ticker = _publish_policy_by_ticker()
     editions = []
     for meta_path in sorted(reports_dir.glob("*/*/metadata.json")):
         date, slug = meta_path.parent.parent.name, meta_path.parent.name
@@ -95,6 +123,8 @@ def load_catalog(reports_dir, include_dev, since=None):
             continue
         d = meta_path.parent
         base = f"/api/report/{date}/{slug}"
+        ticker = m.get("ticker", "")
+        policy = policy_by_ticker.get((ticker or slug).strip().upper(), "approval_required")
         editions.append({
             "date": date, "slug": slug,
             "instrument": m.get("instrument", slug),
@@ -108,6 +138,8 @@ def load_catalog(reports_dir, include_dev, since=None):
             "windowEnd": m.get("prediction_window_end_report_tz", ""),
             "reportDate": m.get("report_date", date),
             "catalystStatus": m.get("catalyst_status", ""),
+            # Approval gate: hidden until an admin un-hides (auto-publish assets ship visible).
+            "hidden": policy != "auto",
             "freeHtml": f"{base}/free.html",
             "freePdf": f"{base}/free.pdf",
             "preview": f"{base}/preview.png",

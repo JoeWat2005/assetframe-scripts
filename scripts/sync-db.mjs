@@ -43,6 +43,21 @@ if (targets.length === 0) {
   process.exit(1);
 }
 
+// Wipe-foot-gun guard: syncOne snapshot-replaces open_calls + scored_results, so syncing
+// empty/missing content would wipe the track record. Refuse up front — before any DB is
+// touched — if catalog.json is absent or has zero editions. Run export_content.py first.
+let guardCatalog;
+try {
+  guardCatalog = readJson("catalog.json");
+} catch (err) {
+  console.error(`Refusing to sync — cannot read content/catalog.json (${err.message}). Run \`python scripts/export_content.py\` first.`);
+  process.exit(1);
+}
+if (!Array.isArray(guardCatalog) || guardCatalog.length === 0) {
+  console.error("Refusing to sync — content/catalog.json has zero editions (syncing empty content would wipe the track record). Run `python scripts/export_content.py` first.");
+  process.exit(1);
+}
+
 // Schema is owned by node-pg-migrate (web/migrations). Run `npm run migrate:up` first
 // (against each branch), or `npm run db:setup`. This script only syncs DATA.
 async function syncOne(label, url) {
@@ -53,12 +68,16 @@ async function syncOne(label, url) {
   for (const e of catalog) {
     const id = `${e.date}/${e.slug}`;
     await sql.query(
+      // Approval gate: `hidden` is set ONLY on INSERT — it is deliberately NOT in the
+      // DO UPDATE SET list, so re-running sync never flips an admin's later un-hide
+      // (set via the web app) back to true.
       `INSERT INTO editions (id, report_date, slug, instrument, ticker, asset_class, status, risk, bias,
          data_quality, window_end, catalyst_status, has_pro, free_html_key, free_pdf_key, preview_key,
          pro_html_key, pro_pdf_key,
-         asset_class_key, direction_view, prediction_type, market_regime, confidence_band, social_context)
+         asset_class_key, direction_view, prediction_type, market_regime, confidence_band, social_context,
+         hidden)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-         $19,$20,$21,$22,$23,$24)
+         $19,$20,$21,$22,$23,$24,$25)
        ON CONFLICT (id) DO UPDATE SET
          report_date=excluded.report_date, slug=excluded.slug, instrument=excluded.instrument,
          ticker=excluded.ticker, asset_class=excluded.asset_class, status=excluded.status,
@@ -74,7 +93,9 @@ async function syncOne(label, url) {
        e.hasPro ? `${e.date}/${e.slug}/pro.html` : null, e.hasPro ? `${e.date}/${e.slug}/pro.pdf` : null,
        // T12 (additive) — pass through when export_content includes them, else null.
        orNull(e.assetClassKey), orNull(e.directionView), orNull(e.predictionType),
-       orNull(e.marketRegime), orNull(e.confidenceBand), toJson(e.socialContext)]
+       orNull(e.marketRegime), orNull(e.confidenceBand), toJson(e.socialContext),
+       // Approval gate (INSERT-only above). Default hidden when export omits the flag.
+       e.hidden === false ? false : true]
     );
   }
 
