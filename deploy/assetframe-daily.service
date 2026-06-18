@@ -1,0 +1,23 @@
+[Unit]
+Description=AssetFrame daily scheduled run (score closed windows + generate all due assets)
+Documentation=https://github.com/JoeWat2005/assetframe-scripts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# oneshot: the timer fires this, it runs the daily production batch, then exits.
+Type=oneshot
+# --- EDIT these three paths to match the VM (same as the poller unit) ---
+WorkingDirectory=/opt/assetframe-scripts
+EnvironmentFile=/opt/assetframe-scripts/.env
+ExecStart=/opt/assetframe-scripts/.venv/bin/python /opt/assetframe-scripts/scripts/scheduled_run.py
+# ------------------------------------------------------------------------
+
+Environment=PYTHONUNBUFFERED=1
+# A full batch (score + generate every due asset, with brief authoring) can run long.
+TimeoutStartSec=5400
+
+NoNewPrivileges=true
+ProtectSystem=full
+
+# No [Install] — this unit is driven by assetframe-daily.timer, not enabled directly.

@@ -1,6 +1,12 @@
 fpdf2>=2.8
 pymupdf>=1.26
 
+# Postgres client (psycopg3) for the OCI engine runner — scripts/engine_ops.py,
+# poller.py, scheduled_run.py poll/write the Neon coordination tables (generation_requests,
+# engine_runs, engine_state). The [binary] extra ships a prebuilt libpq so no system pq-dev
+# is needed on the VM. (sync-db.mjs uses the Node Neon driver; Python had no PG client before.)
+psycopg[binary]>=3.1
+
 # Autonomous brief authoring + adversarial critic (scripts/brief_writer.py, critic.py).
 # Uses the Anthropic Messages API with the server-side web_search tool. A keyless run
 # degrades gracefully to the operator-written brief flow, so this is only required when

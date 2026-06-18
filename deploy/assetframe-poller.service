@@ -1,0 +1,35 @@
+[Unit]
+Description=AssetFrame engine poller (claims queued generation_requests from Neon, runs run_daily.py)
+Documentation=https://github.com/JoeWat2005/assetframe-scripts
+# Outbound network only — this VM exposes NO inbound ports. Wait for the network so the
+# first heartbeat reaches Neon and the admin console flips to "online".
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --- EDIT these three paths to match the VM ---
+WorkingDirectory=/opt/assetframe-scripts
+EnvironmentFile=/opt/assetframe-scripts/.env
+ExecStart=/opt/assetframe-scripts/.venv/bin/python /opt/assetframe-scripts/scripts/poller.py --interval 30
+# ----------------------------------------------
+
+# Long-lived service: keep it up. The poller already rides out transient Neon blips,
+# but if the process ever exits, bring it straight back.
+Restart=always
+RestartSec=5
+# Clean stop: poller.py traps SIGTERM and exits after the current tick.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+# Unbuffered logs -> journalctl shows ticks live (`journalctl -u assetframe-poller -f`).
+Environment=PYTHONUNBUFFERED=1
+
+# Light hardening (the service only needs outbound HTTPS to Neon/R2/data providers and
+# write access to the repo working tree for the ledger + runs/ artifacts).
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target

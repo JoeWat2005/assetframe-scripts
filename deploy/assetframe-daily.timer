@@ -1,0 +1,16 @@
+[Unit]
+Description=Fire the AssetFrame daily scheduled run at 05:00 UTC
+Documentation=https://github.com/JoeWat2005/assetframe-scripts
+
+[Timer]
+# 05:00 UTC every day. OnCalendar is interpreted in the timer's timezone; pin it to UTC
+# so it is independent of the VM's local time (set the VM to UTC anyway — see README).
+OnCalendar=*-*-* 05:00:00 UTC
+# If the VM was asleep/off at 05:00 (or rebooted past it), run as soon as it can.
+Persistent=true
+# Small jitter so we are not hammering data providers at the exact top of the minute.
+RandomizedDelaySec=120
+Unit=assetframe-daily.service
+
+[Install]
+WantedBy=timers.target

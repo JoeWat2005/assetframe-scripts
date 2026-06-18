@@ -20,3 +20,6 @@ ledger/research_memory.json
 
 # Node (the sync-db.mjs publish helper)
 node_modules/
+
+# OCI engine runner: the file lock serialising run_daily across the timer + poller.
+.run.lock
