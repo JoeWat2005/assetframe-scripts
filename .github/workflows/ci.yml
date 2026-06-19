@@ -13,11 +13,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Run engine test suite
+        timeout-minutes: 8
         run: |
           fail=0
           for t in scripts/test_*.py; do
             echo "=== $t ==="
-            python "$t" || fail=1
+            # Hard per-test cap: a hung test fails fast (rc 124) instead of stalling the job.
+            timeout 120 python "$t" || { echo "::error::$t failed or timed out (rc=$?)"; fail=1; }
           done
           exit $fail
 

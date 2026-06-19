@@ -211,10 +211,14 @@ class PauseContract(unittest.TestCase):
     def test_poller_tick_runs_manual_even_when_paused(self):
         # engine_state says PAUSED, but a request is queued -> the poller still runs it.
         claimed = {"id": "rX", "scope": {"assets": ["btc"]}, "status": "running"}
+        # poller.tick drains the queue (claim-until-empty), so the FakeConn must model the
+        # queue emptying: the row is claimable ONCE, then gone. A static row makes the real
+        # claim succeed every iteration and _drain would spin forever (this was the CI hang).
+        _claims = [[claimed]]
         c = FakeConn({
             "select automation_paused": [{"automation_paused": True}],
             "set status = 'cancelled'": [],
-            "set status = 'running'": [claimed],
+            "set status = 'running'": lambda _p: (_claims.pop(0) if _claims else []),
         })
         with mock.patch.object(poller.engine_ops, "run_and_record",
                                return_value="req-rX") as rar:
