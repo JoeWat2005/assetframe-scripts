@@ -1,4 +1,5 @@
 name: ci
+
 on: [push, pull_request]
 
 jobs:
@@ -19,3 +20,37 @@ jobs:
             python "$t" || fail=1
           done
           exit $fail
+
+  # Continuous deploy to the OCI engine box. Runs ONLY after the tests pass, ONLY on a push to
+  # main, and ONLY once you've opted in by setting the repo variable DEPLOY_ENABLED=true (so this
+  # job stays dormant until the self-hosted runner is registered — see deploy/README.md §9).
+  #
+  # It runs ON the box via a self-hosted runner (label: assetframe), which keeps the VM
+  # inbound-portless: the runner dials out to GitHub, no SSH port is exposed. The box updates the
+  # live checkout at /opt/assetframe-scripts and restarts the poller; the daily timer picks up new
+  # code on its next fire automatically.
+  deploy:
+    needs: python-tests
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      vars.DEPLOY_ENABLED == 'true'
+    runs-on: [self-hosted, assetframe]
+    concurrency:
+      group: assetframe-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Update and restart the engine
+        run: |
+          set -euo pipefail
+          cd /opt/assetframe-scripts
+          # The box pushes its own ledger commits to origin/main, so origin is the source of
+          # truth. --ff-only refuses (rather than destroys) if the tree ever diverged.
+          git fetch --prune origin
+          git checkout main
+          git pull --ff-only origin main
+          .venv/bin/pip install -r requirements.txt --quiet
+          npm install --omit=dev --no-audit --no-fund
+          sudo systemctl restart assetframe-poller.service
+          sleep 2
+          systemctl is-active assetframe-poller.service
