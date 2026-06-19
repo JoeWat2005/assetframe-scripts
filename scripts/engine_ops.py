@@ -104,8 +104,12 @@ def _utcnow():
 # touched when there is real work (a wake flag the web sets on enqueue) or on a periodic safety
 # sweep. GRACEFUL: with no Upstash env these return None/False and the poller falls back to polling
 # Neon every tick (the original behaviour) — so this is inert until UPSTASH_* is set on the box.
-HEARTBEAT_KEY = "af:engine:heartbeat"
-WAKE_KEY = "af:engine:wake"
+# UPSTASH_KEY_PREFIX namespaces a 2nd environment (e.g. "dev:") onto the SAME Upstash DB so the
+# dev + prod pollers don't collide on heartbeat/wake; unset = prod (no prefix). The web must set
+# the SAME prefix on its matching environment (Vercel Preview = dev).
+KEY_PREFIX = os.environ.get("UPSTASH_KEY_PREFIX", "")
+HEARTBEAT_KEY = f"{KEY_PREFIX}af:engine:heartbeat"
+WAKE_KEY = f"{KEY_PREFIX}af:engine:wake"
 HEARTBEAT_TTL = 180  # seconds; matches the web console's online window
 
 
