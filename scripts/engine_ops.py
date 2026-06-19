@@ -32,6 +32,7 @@ import os
 import subprocess
 import sys
 import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -95,6 +96,73 @@ def connect():
 
 def _utcnow():
     return datetime.now(timezone.utc)
+
+
+# --------------------------------------------------------------- Upstash (wake signal)
+# The poller's idle loop heartbeats + checks for queued work via Upstash Redis (REST), NOT Neon,
+# so the Neon compute can auto-suspend and we stay inside the free-tier compute-hours. Neon is only
+# touched when there is real work (a wake flag the web sets on enqueue) or on a periodic safety
+# sweep. GRACEFUL: with no Upstash env these return None/False and the poller falls back to polling
+# Neon every tick (the original behaviour) — so this is inert until UPSTASH_* is set on the box.
+HEARTBEAT_KEY = "af:engine:heartbeat"
+WAKE_KEY = "af:engine:wake"
+HEARTBEAT_TTL = 180  # seconds; matches the web console's online window
+
+
+def _upstash_creds():
+    _load_dotenv_into_environ()
+    url = (os.environ.get("UPSTASH_REDIS_REST_URL")
+           or os.environ.get("UPSTASH_KV_REST_API_URL")
+           or os.environ.get("KV_REST_API_URL"))
+    token = (os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+             or os.environ.get("UPSTASH_KV_REST_API_TOKEN")
+             or os.environ.get("KV_REST_API_TOKEN"))
+    if url and token:
+        return url.rstrip("/"), token
+    return None, None
+
+
+def upstash_enabled():
+    """True when Upstash REST creds are configured (else the poller stays on Neon polling)."""
+    return _upstash_creds()[0] is not None
+
+
+def _upstash(command):
+    """Run one Upstash REST command (e.g. ["SET","k","v"]). Returns the result, or None on any
+    error / when Upstash isn't configured. Never raises — a wake-signal blip must not crash the loop."""
+    url, token = _upstash_creds()
+    if not url:
+        return None
+    try:
+        req = urllib.request.Request(
+            url, data=json.dumps(command).encode("utf-8"),
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8")).get("result")
+    except Exception:
+        return None
+
+
+def heartbeat_upstash():
+    """Write the engine heartbeat to Upstash with a TTL (expires if the poller dies)."""
+    return _upstash(["SET", HEARTBEAT_KEY, _utcnow().isoformat(), "EX", str(HEARTBEAT_TTL)])
+
+
+def wake_pending():
+    """True if the web flagged that a generation request is waiting (set on enqueue)."""
+    return bool(_upstash(["GET", WAKE_KEY]))
+
+
+def clear_wake():
+    """Clear the wake flag — call it right before draining Neon so a request enqueued mid-drain
+    re-sets the flag and is picked up next tick (no lost requests)."""
+    _upstash(["DEL", WAKE_KEY])
+
+
+def signal_wake():
+    """Set the wake flag (the web does this on enqueue; also handy for tests / manual pokes)."""
+    return _upstash(["SET", WAKE_KEY, "1", "EX", "3600"])
 
 
 # ---------------------------------------------------------------- engine_state

@@ -2,10 +2,12 @@
 """poller.py — the always-on engine loop (systemd service on the OCI VM).
 
 Each tick (default every 30s):
-  1. heartbeat()                       -> engine_state.last_heartbeat_at = now()
-                                          (this is how the admin console flips to "online")
-  2. claim_next_request()              -> atomically grab the oldest queued request
-  3. if claimed: run_and_record(trigger='manual', scope=row.scope, request_id=row.id)
+  1. heartbeat_upstash()               -> write the heartbeat to Upstash (NO Neon), so the Neon
+                                          compute can auto-suspend (stay in free-tier hours).
+  2. only open Neon when there is work -> the web sets an Upstash wake flag on enqueue; plus a
+                                          periodic Neon safety sweep. (No Upstash env? fall back to
+                                          opening Neon every tick — the original behaviour.)
+  3. when on Neon: heartbeat(conn) + drain every queued request (run_and_record, manual trigger).
 
 MANUAL requests run even when automation_paused is true — enqueuing a request is an
 explicit admin action, distinct from the scheduled timer (scheduled_run.py respects
@@ -47,28 +49,39 @@ def _log(msg):
     print(f"[poller {ts}Z] {msg}", flush=True)
 
 
+SAFETY_NEON_EVERY = 60   # ticks — a periodic Neon claim (~30 min at 30s) in case a wake was missed
+
+
+def _drain(conn):
+    """Claim and run EVERY queued request until the queue is empty (or SIGTERM). Returns the last
+    run_id, or None if nothing was queued."""
+    last = None
+    while not _STOP:
+        row = engine_ops.claim_next_request(conn)
+        if not row:
+            break
+        req_id = row.get("id")
+        scope = row.get("scope") or {}
+        _log(f"claimed request {req_id} scope={scope} -> running (manual; ignores pause)")
+        last = engine_ops.run_and_record(conn, trigger="manual", scope=scope, request_id=req_id)
+        _log(f"request {req_id} finished as run {last}")
+    return last
+
+
 def tick(conn):
-    """One poll cycle against an open connection. Returns the run_id if a request was
-    claimed and run this tick, else None. Raises only if the caller's connection is
-    unusable (the caller treats that as a tick failure and reconnects next time)."""
+    """One Neon service pass on an open connection: stamp the Neon heartbeat and drain the queue.
+    The cheap idle Upstash heartbeat + wake-check happens in loop()/run_once() BEFORE Neon opens."""
     engine_ops.heartbeat(conn)
-    row = engine_ops.claim_next_request(conn)
-    if not row:
-        return None
-    req_id = row.get("id")
-    scope = row.get("scope") or {}
-    _log(f"claimed request {req_id} scope={scope} -> running (manual; ignores pause)")
-    run_id = engine_ops.run_and_record(conn, trigger="manual", scope=scope,
-                                       request_id=req_id)
-    _log(f"request {req_id} finished as run {run_id}")
-    return run_id
+    return _drain(conn)
 
 
 def run_once():
-    """A single tick with its own connection. Returns the run_id or None. Never raises
-    (a DB/connection error is logged and swallowed so --once is safe in any state)."""
+    """A single pass (used by --once / tests): heartbeat Upstash, then check Neon once. Never
+    raises on a transient error, so --once is safe in any state."""
+    engine_ops.heartbeat_upstash()
     try:
         with engine_ops.connect() as conn:
+            engine_ops.clear_wake()
             return tick(conn)
     except engine_ops.ConfigError as ex:
         _log(f"CONFIG ERROR: {ex}")
@@ -79,16 +92,26 @@ def run_once():
 
 
 def loop(interval):
-    """The long-lived poll loop. One bad tick is logged and skipped; the loop only
-    exits on SIGTERM. A fresh connection per tick means a dropped Neon connection
-    self-heals on the following tick."""
-    _log(f"starting — interval={interval}s. Manual requests run even when paused; "
-         f"the daily timer (scheduled_run.py) respects the pause flag.")
+    """The long-lived poll loop. Each tick heartbeats Upstash (cheap, NO Neon) and only opens a
+    Neon connection when there is work (the web's wake flag), on a periodic safety sweep, or when
+    Upstash isn't configured (it then falls back to the original per-tick Neon polling). This lets
+    the Neon compute auto-suspend while idle. One bad tick is logged and skipped; only SIGTERM exits."""
+    using = "Upstash" if engine_ops.upstash_enabled() else "Neon (no Upstash env — per-tick polling)"
+    _log(f"starting — interval={interval}s; work signal via {using}. "
+         f"Manual requests run even when paused; the daily timer respects the pause flag.")
+    n = 0
     while not _STOP:
         t0 = time.time()
+        n += 1
         try:
-            with engine_ops.connect() as conn:
-                tick(conn)
+            engine_ops.heartbeat_upstash()   # cheap; returns None (no-op) when Upstash is unset
+            do_neon = (not engine_ops.upstash_enabled()
+                       or engine_ops.wake_pending()
+                       or n % SAFETY_NEON_EVERY == 0)
+            if do_neon:
+                with engine_ops.connect() as conn:
+                    engine_ops.clear_wake()   # going to Neon now; a request enqueued mid-drain re-sets it
+                    tick(conn)
         except engine_ops.ConfigError as ex:
             # No DATABASE_URL is not transient — fail loudly so systemd surfaces it.
             _log(f"CONFIG ERROR: {ex}")
