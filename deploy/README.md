@@ -272,6 +272,7 @@ the environment, so it's config-only — no code change. Three isolation require
 sudo mkdir -p /opt/assetframe-scripts-dev && sudo chown -R opc:opc /opt/assetframe-scripts-dev
 git clone https://github.com/JoeWat2005/assetframe-scripts.git /opt/assetframe-scripts-dev
 cd /opt/assetframe-scripts-dev
+git checkout development        # the dev folder tracks the `development` branch (prod tracks `main`)
 python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt && npm install
 # 3. Dev .env: same R2 keys + ANTHROPIC_API_KEY as prod, but the DEV Neon URL and the dev bucket:
 #      DATABASE_URL=postgresql://...@ep-twilight-bonus-...neon.tech/neondb?sslmode=require&channel_binding=require
