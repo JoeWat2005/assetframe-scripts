@@ -20,7 +20,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import brief_writer as BW
 
-BRIEF_DIR = Path(__file__).resolve().parent.parent / "data" / "briefs"
+# Committed fixtures live next to the tests. The runtime data/ dir is gitignored, so a clean
+# checkout (CI) has no real briefs — these tracked copies are the schema examples we validate.
+BRIEF_DIR = Path(__file__).resolve().parent / "test_fixtures"
 
 
 def _load(name):
@@ -122,7 +124,7 @@ class TestAnalysisCompaction(unittest.TestCase):
     do-not-author — never an empty dump."""
 
     def _analysis(self):
-        ap = Path(__file__).resolve().parent.parent / "data" / "analysis" / "BTC_analysis.json"
+        ap = Path(__file__).resolve().parent / "test_fixtures" / "BTC_analysis.json"
         return json.loads(ap.read_text(encoding="utf-8-sig"))
 
     def test_keys_present(self):
