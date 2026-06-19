@@ -225,3 +225,66 @@ scoped run from the console and watch the poller claim it (`journalctl -u assetf
 - **Update the engine:** `cd /opt/assetframe-scripts && git pull && .venv/bin/pip install
   -r requirements.txt && sudo systemctl restart assetframe-poller.service` (the timer picks
   up the new code on its next fire automatically).
+
+---
+
+## Auto-deploy (GitHub Actions, optional)
+
+`.github/workflows/ci.yml` has a `deploy` job that runs **after the tests pass**, **only on push
+to `main`**, and **only when `DEPLOY_ENABLED=true`**. It runs ON this box via a **self-hosted
+runner**, so the VM stays inbound-portless (the runner dials out to GitHub). It fast-forwards the
+checkout(s) and restarts the poller(s). To enable:
+
+1. Install a self-hosted runner — GitHub → repo **Settings → Actions → Runners → New self-hosted
+   runner → Linux / ARM64**. Run the shown commands as `opc`, adding the label, and install as a
+   service so it survives reboots:
+   ```bash
+   ./config.sh --url https://github.com/JoeWat2005/assetframe-scripts --token <TOKEN> --labels assetframe --unattended
+   sudo ./svc.sh install && sudo ./svc.sh start
+   ```
+2. Let the runner restart the poller(s) without a password:
+   ```bash
+   echo 'opc ALL=(root) NOPASSWD: /usr/bin/systemctl restart assetframe-poller.service, /usr/bin/systemctl restart assetframe-poller-dev.service' | sudo tee /etc/sudoers.d/assetframe-deploy
+   sudo chmod 440 /etc/sudoers.d/assetframe-deploy
+   ```
+3. Set repo variable `DEPLOY_ENABLED=true` (**Settings → Secrets and variables → Actions →
+   Variables**). Now every push to `main` runs the tests and, if green, deploys here.
+
+> Self-hosted runners are safe on a **private** repo only — keep `assetframe-scripts` private (a
+> public repo would let fork PRs run code on the box).
+
+## Dev worker (optional second environment)
+
+Run a second, fully **isolated** worker so the **preview** site's admin console can generate into
+the dev database without touching prod. Engine + web both read `DATABASE_URL` / `R2_BUCKET` from
+the environment, so it's config-only — no code change. Three isolation requirements:
+
+- **Separate checkout** `/opt/assetframe-scripts-dev` — its own run-lock, `runs/`, and ledger (the
+  lock is per-directory; a shared dir would make dev/prod runs fail each other or pollute the prod
+  ledger).
+- **Separate R2 bucket** `assetframe-pro-dev` — so a dev report never overwrites a prod file.
+- **Vercel Preview env** → `R2_BUCKET=assetframe-pro-dev` (it already uses the dev `DATABASE_URL`).
+
+```bash
+# 1. Create the R2 bucket `assetframe-pro-dev` in Cloudflare. Make sure your R2 token is
+#    account-scoped (not bucket-scoped) so it can write both buckets.
+# 2. Second checkout + venv + deps:
+sudo mkdir -p /opt/assetframe-scripts-dev && sudo chown -R opc:opc /opt/assetframe-scripts-dev
+git clone https://github.com/JoeWat2005/assetframe-scripts.git /opt/assetframe-scripts-dev
+cd /opt/assetframe-scripts-dev
+python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt && npm install
+# 3. Dev .env: same R2 keys + ANTHROPIC_API_KEY as prod, but the DEV Neon URL and the dev bucket:
+#      DATABASE_URL=postgresql://...@ep-twilight-bonus-...neon.tech/neondb?sslmode=require&channel_binding=require
+#      R2_BUCKET=assetframe-pro-dev
+chmod 600 .env
+# 4. Install + start the dev poller (runs as opc; NO daily timer — dev is on-demand):
+sudo cp deploy/assetframe-poller-dev.service /etc/systemd/system/
+sudo sed -i '/^\[Service\]/a User=opc\nGroup=opc' /etc/systemd/system/assetframe-poller-dev.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now assetframe-poller-dev.service
+# 5. In Vercel: set the Preview environment R2_BUCKET=assetframe-pro-dev and redeploy preview.
+```
+
+The dev poller heartbeats the **dev** DB's `engine_state`, so the preview admin console shows it
+online and its "Generate now" queues into the dev DB. The auto-deploy job updates this checkout
+automatically once it exists.

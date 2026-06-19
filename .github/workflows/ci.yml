@@ -43,14 +43,25 @@ jobs:
       - name: Update and restart the engine
         run: |
           set -euo pipefail
-          cd /opt/assetframe-scripts
-          # The box pushes its own ledger commits to origin/main, so origin is the source of
-          # truth. --ff-only refuses (rather than destroys) if the tree ever diverged.
-          git fetch --prune origin
-          git checkout main
-          git pull --ff-only origin main
-          .venv/bin/pip install -r requirements.txt --quiet
-          npm install --omit=dev --no-audit --no-fund
-          sudo systemctl restart assetframe-poller.service
-          sleep 2
-          systemctl is-active assetframe-poller.service
+          # update <dir> <service> — fast-forward a checkout and restart its poller.
+          update() {
+            echo "::group::deploy $1"
+            cd "$1"
+            # The box pushes its own ledger commits to origin/main, so origin is the source of
+            # truth. --ff-only refuses (rather than destroys) if the tree ever diverged.
+            git fetch --prune origin
+            git checkout main
+            git pull --ff-only origin main
+            .venv/bin/pip install -r requirements.txt --quiet
+            npm install --omit=dev --no-audit --no-fund
+            sudo systemctl restart "$2"
+            sleep 2
+            systemctl is-active "$2"
+            echo "::endgroup::"
+          }
+          # Prod worker (always present).
+          update /opt/assetframe-scripts assetframe-poller.service
+          # Dev worker (only if the second checkout exists — see deploy/README.md §Dev worker).
+          if [ -d /opt/assetframe-scripts-dev ]; then
+            update /opt/assetframe-scripts-dev assetframe-poller-dev.service
+          fi

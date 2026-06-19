@@ -1,0 +1,29 @@
+[Unit]
+Description=AssetFrame engine poller — DEV (polls the dev Neon branch, publishes to the dev R2 bucket)
+Documentation=https://github.com/JoeWat2005/assetframe-scripts
+# Outbound network only — no inbound ports, same as the prod poller.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The DEV worker runs from a SEPARATE checkout so it has its own run-lock, runs/ and ledger
+# (a shared dir would let dev runs fail or pollute prod). Its .env carries the dev DATABASE_URL
+# and R2_BUCKET=assetframe-pro-dev. --- EDIT these three paths if you deploy elsewhere ---
+WorkingDirectory=/opt/assetframe-scripts-dev
+EnvironmentFile=/opt/assetframe-scripts-dev/.env
+ExecStart=/opt/assetframe-scripts-dev/.venv/bin/python /opt/assetframe-scripts-dev/scripts/poller.py --interval 30
+# -------------------------------------------------------------------------------------------
+
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Environment=PYTHONUNBUFFERED=1
+
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target
