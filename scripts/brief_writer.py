@@ -44,7 +44,9 @@ from pathlib import Path
 
 # Latest capable Claude model — kept as a single constant so it is trivial to bump.
 DEFAULT_MODEL = "claude-opus-4-8"
-DEFAULT_MAX_TOKENS = 8000
+DEFAULT_MAX_TOKENS = 16000  # a full brief is ~7k tok of JSON and web_search tool turns
+                            # share this budget; 8000 truncated the JSON mid-object ->
+                            # parse/validation fail -> needs_brief (see req-8104b5f4).
 # Per-million-token USD prices used only for the stderr cost estimate (best-effort;
 # the ledger records the live `usage` numbers, not this estimate). Override via env.
 PRICE_IN_PER_MTOK = float(os.environ.get("ANTHROPIC_PRICE_IN", "5.0"))
@@ -534,6 +536,11 @@ def author_brief(ticker, analysis, memory_pack, research, social, *, model,
 
         brief, perr = _extract_json(resp.content)
         errs = [perr] if perr else validate_brief(brief)
+        if errs and getattr(resp, "stop_reason", None) == "max_tokens":
+            # Output hit the token ceiling, so the JSON was cut off. Name the real cause
+            # instead of a downstream "could not parse JSON" guess (still re-prompts once).
+            errs = [f"model hit max_tokens={max_tokens} (output truncated before the JSON "
+                    f"closed); raise --max-tokens"] + errs
         telemetry = {"model": model, "input_tokens": tot_in, "output_tokens": tot_out,
                      "web_searches": tot_web, "attempts": attempt,
                      "est_cost_usd": round((tot_in / 1e6) * PRICE_IN_PER_MTOK
