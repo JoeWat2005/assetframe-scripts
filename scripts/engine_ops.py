@@ -982,6 +982,126 @@ def _cmd_run_scoring(conn, args):
     return False, f"scoring run exited {p.returncode}", _tail(out, 2000), False
 
 
+def _r2_client():
+    """Build the R2 (S3-compatible) client from env (R2_ACCOUNT_ID/ACCESS_KEY_ID/SECRET_ACCESS_KEY/
+    BUCKET, loaded from ROOT/.env). Returns (client, bucket). Raises if creds/boto3 are missing."""
+    _load_dotenv_into_environ()
+    acct = os.environ.get("R2_ACCOUNT_ID")
+    ak = os.environ.get("R2_ACCESS_KEY_ID")
+    sk = os.environ.get("R2_SECRET_ACCESS_KEY")
+    bucket = os.environ.get("R2_BUCKET")
+    if not (acct and ak and sk and bucket):
+        raise RuntimeError("R2_* env vars not set")
+    import boto3
+    client = boto3.client(
+        "s3", endpoint_url=f"https://{acct}.r2.cloudflarestorage.com",
+        aws_access_key_id=ak, aws_secret_access_key=sk, region_name="auto")
+    return client, bucket
+
+
+def _cmd_compute_due(conn, args):
+    """Run run_daily --mode dry_run (no generation, no network) to compute the engine's DUE plan,
+    then write each asset's due status back to engine_assets so the dashboard can show which
+    instruments are scheduled to generate. Safe + read-only w.r.t. reports."""
+    try:
+        p = subprocess.run([sys.executable, str(RUN_DAILY), "--mode", "dry_run"],
+                           cwd=str(ROOT), capture_output=True, text=True, timeout=180)
+    except Exception as ex:
+        return False, f"dry_run failed to launch: {ex}"[:200], None, False
+    if p.returncode != 0:
+        return False, f"dry_run exited {p.returncode}", _tail((p.stdout or "") + (p.stderr or ""), 1000), False
+    manifest, _path = _read_run_manifest()
+    plan = (manifest or {}).get("plan") or []
+    if not plan:
+        return False, "no plan found in the dry-run manifest", None, False
+    updated = 0
+    for entry in plan:
+        aid = entry.get("asset_id")
+        if not aid:
+            continue
+        due = entry.get("decision") == "generate"
+        reason = str(entry.get("reason") or "")[:200]
+        try:
+            conn.execute(
+                "UPDATE engine_assets SET due = %s, due_reason = %s, due_checked_at = now() WHERE id = %s",
+                (due, reason, aid))
+            updated += 1
+        except psycopg.errors.UndefinedColumn:
+            return False, "engine_assets is missing the due columns — run npm run migrate:up", None, False
+        except Exception:
+            pass
+    due_now = sum(1 for e in plan if e.get("decision") == "generate")
+    return True, f"due plan computed: {due_now}/{len(plan)} due now (updated {updated})", None, False
+
+
+def _cmd_service_check(conn, args):
+    """Health-check that the box can reach Neon, R2 and Upstash. Read-only; the result (per-service
+    status) shows in the Box command log."""
+    lines = []
+    try:
+        row = conn.execute("SELECT 1 AS ok").fetchone()
+        lines.append(f"Neon:    OK (SELECT 1 -> {row.get('ok') if row else '?'})")
+    except Exception as ex:
+        lines.append(f"Neon:    FAIL ({str(ex)[:140]})")
+    try:
+        client, bucket = _r2_client()
+        client.list_objects_v2(Bucket=bucket, MaxKeys=1)
+        lines.append(f"R2:      OK (bucket '{bucket}' reachable)")
+    except Exception as ex:
+        lines.append(f"R2:      FAIL ({str(ex)[:140]})")
+    try:
+        if upstash_enabled():
+            hb = _upstash(["GET", HEARTBEAT_KEY])
+            lines.append(f"Upstash: OK (heartbeat -> {hb or 'none yet'})")
+        else:
+            lines.append("Upstash: not configured (poller falls back to per-tick Neon polling)")
+    except Exception as ex:
+        lines.append(f"Upstash: FAIL ({str(ex)[:140]})")
+    out = "\n".join(lines)
+    ok = "FAIL" not in out
+    return ok, "service check: " + ("all reachable" if ok else "one or more FAILED — see log"), out, False
+
+
+def _cmd_clear_r2(conn, args):
+    """Delete report objects from R2. args {date:'YYYY-MM-DD'} clears just that date's prefix; with
+    no date it clears the WHOLE bucket. Destructive — the web confirms first."""
+    import re as _re
+    try:
+        client, bucket = _r2_client()
+    except Exception as ex:
+        return False, f"R2 not configured: {str(ex)[:160]}", None, False
+    date = (args or {}).get("date")
+    prefix = f"{date}/" if date and _re.match(r"^\d{4}-\d{2}-\d{2}$", str(date)) else ""
+    deleted = 0
+    try:
+        token = None
+        while True:
+            kw = {"Bucket": bucket, "MaxKeys": 1000}
+            if prefix:
+                kw["Prefix"] = prefix
+            if token:
+                kw["ContinuationToken"] = token
+            resp = client.list_objects_v2(**kw)
+            objs = [{"Key": o["Key"]} for o in resp.get("Contents", [])]
+            if objs:
+                client.delete_objects(Bucket=bucket, Delete={"Objects": objs})
+                deleted += len(objs)
+            if resp.get("IsTruncated"):
+                token = resp.get("NextContinuationToken")
+            else:
+                break
+    except Exception as ex:
+        return False, f"R2 delete failed after {deleted}: {str(ex)[:160]}", None, False
+    scope = f"date {date}" if prefix else "the whole bucket"
+    return True, f"deleted {deleted} object(s) from R2 ({scope})", None, False
+
+
+def _cmd_clear_wake(conn, args):
+    """Clear the Upstash wake flag (in case a stale wake key is stuck on the next tick)."""
+    clear_wake()
+    return True, "cleared the Upstash wake flag", None, False
+
+
 _COMMAND_HANDLERS = {
     "restart_poller": _cmd_restart_poller,
     "pull_latest": _cmd_pull_latest,
@@ -992,6 +1112,10 @@ _COMMAND_HANDLERS = {
     "reset_ledger": _cmd_reset_ledger,
     "clear_reports": _cmd_clear_reports,
     "run_scoring": _cmd_run_scoring,
+    "compute_due": _cmd_compute_due,
+    "service_check": _cmd_service_check,
+    "clear_r2": _cmd_clear_r2,
+    "clear_wake": _cmd_clear_wake,
 }
 
 # Canonical allow-list (the web keeps its own copy for defence in depth; this is the boundary).
