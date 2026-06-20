@@ -19,8 +19,9 @@ Confidence blends four parts, then applies hard caps, then a calibration map:
              REDUCE the score, never raise it. Absent -> 0.
 
 Hard caps (take the min): stale data 40 · degraded data 50 ·
-single-source/unverified high-impact thesis 55 · hype-driven thesis 55 ·
-ledger shows a strong historical failure pattern 55 · cold indicators 60 ·
+hype-driven thesis 55 · ledger shows a strong historical failure pattern 55 ·
+unverified/stale thesis claim 55 (defence-in-depth; the brief validator blocks these) ·
+single-source thesis claim 65 (a yellow flag, not a near-neutral pin) · cold indicators 60 ·
 high-impact catalyst INSIDE the prediction window 60 · engine errors 65.
 
 Every output carries `components` (for the Pro scorecard) and `caps_applied`,
@@ -30,6 +31,8 @@ from taxonomy import confidence_band
 
 CONF_VERSION = 2                       # bumped from the freehand era (v1) so calibration can filter
 WEIGHTS = {"market": 50, "ledger": 30, "catalyst": 20}   # tunable; calibration is ground truth
+CLASS_PRIOR_MAX_W = 3                   # asset-class hit rate is a faint prior; the instrument's
+                                        # own record drives the ledger component (learn per-stock)
 
 _CLAIM_STATUS_SCORE = {
     "multiple-source": 1.0, "multi-source": 1.0, "confirmed": 1.0, "official": 1.0,
@@ -216,13 +219,18 @@ def ledger_confidence(ledger_context, pred_type=None):
                            ledger_context.get("asset_class_count", 0)))
     if not candidates:
         return 0.5, {"reason": "no rates (neutral prior)"}
+    # Instrument-specific evidence (this instrument's own prediction-type + overall hit
+    # rate) DRIVES the score; the asset-class rate is only a faint prior (weight-capped),
+    # so e.g. BTC's confidence learns from BTC's own track record and a large crypto-class
+    # sample cannot drown a present instrument record. Bayesian blend over a 0.5 prior.
     num, den, detail = 0.5, 1.0, []   # prior: pseudo-count 1 at 0.5
     for basis, rate, cnt in candidates:
         r01 = rate / 100.0 if rate > 1 else rate
         cnt = cnt or 0
-        num += r01 * cnt
-        den += cnt
-        detail.append({"basis": basis, "rate": rate, "n": cnt})
+        w = min(cnt, CLASS_PRIOR_MAX_W) if basis == "asset_class" else cnt
+        num += r01 * w
+        den += w
+        detail.append({"basis": basis, "rate": rate, "n": cnt, "weight": w})
     return _clamp(num / den), {"blend": detail}
 
 
@@ -294,11 +302,26 @@ def social_adjustment(social_pack):
 
 # --- caps -------------------------------------------------------------------
 
-def _has_unsupported_thesis(brief):
+def _thesis_source_cap(brief):
+    """Confidence ceiling implied by the WEAKEST claim the thesis rests on.
+      * single-source -> 65: one unconfirmed source is a yellow flag, not a near-neutral
+        ceiling. The technical setup (market component) still moves the score below 65,
+        and catalyst_confidence already discounts the claim — so a hard 55 here double-pins
+        an otherwise technically-strong call at ~neutral (the "always 55" bug).
+      * unverified/stale/unavailable -> 55: these must never DRIVE a thesis (the brief
+        validator blocks used_in_thesis for them); kept as defence-in-depth if a malformed
+        brief slips through.
+    Returns the cap (int) or None when no weak claim drives the thesis."""
+    cap = None
     for c in ((brief or {}).get("claims") or []):
-        if c.get("used_in_thesis") and (c.get("status") or "").lower() in _WEAK_STATUSES:
-            return True
-    return False
+        if not c.get("used_in_thesis"):
+            continue
+        st = (c.get("status") or "").lower()
+        if st in ("unverified", "stale", "unavailable"):
+            return 55
+        if st == "single-source":
+            cap = 65 if cap is None else min(cap, 65)
+    return cap
 
 
 def _hype_thesis(brief, social_pack):
@@ -379,8 +402,9 @@ def compute_confidence(analysis, setup, brief=None, research_pack=None,
         cap = min(cap, 60); caps.append("cold_indicators->60")
     if analysis.get("errors"):
         cap = min(cap, 65); caps.append("engine_errors->65")
-    if _has_unsupported_thesis(brief):
-        cap = min(cap, 55); caps.append("single_source_thesis->55")
+    ss_cap = _thesis_source_cap(brief)
+    if ss_cap is not None:
+        cap = min(cap, ss_cap); caps.append(f"single_source_thesis->{ss_cap}")
     if _hype_thesis(brief, social_pack):
         cap = min(cap, 55); caps.append("hype_driven_thesis->55")
     if _ledger_failure(ledger_context, pred_type):

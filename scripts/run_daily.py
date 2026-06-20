@@ -349,11 +349,16 @@ def _total_token_cost(summaries):
 
 
 # --------------------------------------------------------------- generate step
-def generate_asset(asset, now, no_render):
-    """Deterministic per-asset pipeline: intraday -> memory_pack -> [brief] -> scaffold
-    -> confidence -> mvp_report. Returns a manifest job record (never raises)."""
+def generate_asset(asset, now, no_render, as_of=None):
+    """Deterministic per-asset pipeline: intraday -> memory_pack -> ledger_context ->
+    [brief] -> scaffold -> confidence -> mvp_report. Returns a manifest job record (never
+    raises). When `as_of` is set the run is BACKDATED: `now` is the as-of moment and we
+    forward it to the data + scaffold stages so the prediction window is past-dated (and
+    therefore scoreable), with no look-ahead in the ledger memory."""
     t0 = time.time()
     tk = asset["ticker"]
+    backdated = bool(as_of)
+    now_arg = now.strftime("%Y-%m-%d %H:%M")
     rec = {"asset_id": asset["id"], "ticker": tk, "asset_class": asset["asset_class"],
            "report_id": None, "status": "error", "stages": {}, "errors": [],
            "token_cost": {"input_tokens": 0, "output_tokens": 0, "web_searches": 0,
@@ -371,6 +376,8 @@ def generate_asset(asset, now, no_render):
             "--hrange", "10d", "--roll-utc", str(asset.get("roll_utc", 0))]
     if asset.get("related"):
         icmd += ["--related", asset["related"]]
+    if backdated:
+        icmd += ["--as-of", now_arg]   # trim bars to <= the as-of moment (no look-ahead)
     ok, _ = stage("intraday", icmd, timeout=120)
     if not ok:
         rec["status"] = "data_error"; rec["duration_s"] = round(time.time() - t0, 1); return rec
@@ -416,9 +423,21 @@ def generate_asset(asset, now, no_render):
             return rec
         rec["stages"]["brief"] = "authored"
 
+    # 3.5 per-instrument ledger context (the confidence engine's "memory"): turn THIS
+    # instrument's own closed, scored windows into hit-rate priors as-of `now`. No
+    # look-ahead — a backdated run only sees rows that closed before the as-of moment.
+    # This writes the exact file scaffold reads, so the PUBLISHED confidence number learns
+    # from the track record (not just the prose brief). BTC reruns use only BTC's rows;
+    # an empty/young ledger yields a valid neutral context. Best-effort (never blocks).
+    lcmd = ["scripts/ledger_context.py", tk, "--ticker", tk,
+            "--asset-class", asset.get("asset_class", ""), "--as-of", now_arg]
+    stage("ledger_context", lcmd, timeout=60)
+
     # 4. scaffold (payload + predictions + deterministic confidence)
-    ok, _ = stage("scaffold", ["scripts/scaffold_payload.py", tk,
-                               "--session-profile", asset["session_profile"]])
+    scmd = ["scripts/scaffold_payload.py", tk, "--session-profile", asset["session_profile"]]
+    if backdated:
+        scmd += ["--as-of", now_arg]   # past-date the prediction window so it can be scored
+    ok, _ = stage("scaffold", scmd)
     if not ok:
         rec["status"] = "scaffold_error"; rec["duration_s"] = round(time.time() - t0, 1); return rec
 
@@ -470,7 +489,7 @@ def main():
         print(f"generating {len(due_assets)} due asset(s) with {o['workers']} worker(s)...")
         jobs = []
         with ThreadPoolExecutor(max_workers=max(1, o["workers"])) as pool:
-            futs = {pool.submit(generate_asset, a, now, o["no_render"]): a for a in due_assets}
+            futs = {pool.submit(generate_asset, a, now, o["no_render"], o["as_of"]): a for a in due_assets}
             for f in as_completed(futs):
                 rec = f.result()
                 jobs.append(rec)

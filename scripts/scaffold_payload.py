@@ -305,10 +305,20 @@ def build_predictions_spec(by_id, brief, direction):
 # --- payload assembly -------------------------------------------------------
 
 def assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
-             setups, ladder, ledger_levels, conf, asset_class, regime, pred_type):
+             setups, ladder, ledger_levels, conf, asset_class, regime, pred_type,
+             as_of_dt=None):
     ticker = brief.get("ticker", name).upper()
     instrument = brief.get("instrument", name)
     report_date = (session.get("window_start_utc") or analysis.get("fetched_utc") or "")[:10]
+    # report_id is the ledger/edition primary key (ON CONFLICT (report_id)) and the scorer's
+    # dedup key. A live daily run keeps the stable one-per-UTC-day id AF-YYYYMMDD-TICKER. A
+    # BACKDATED run embeds the window-start time (AF-YYYYMMDDHHMM-TICKER) so several reports
+    # on the same UTC date (different as-of moments) land DISTINCT ledger rows instead of the
+    # second being dropped as an already-scored duplicate — that's how you grow the track
+    # record quickly when testing. Ticker stays the rsplit('-',1) suffix, so every downstream
+    # parser (year = first 4 digits, ticker = last segment) is unaffected.
+    rid_stamp = (as_of_dt.strftime("%Y%m%d%H%M") if as_of_dt is not None
+                 else report_date.replace("-", ""))
     win_s, win_e = session["window_start_utc"], session["window_end_utc"]
     dq = conf_engine.compute_dq(analysis, brief.get("claims"),
                                 brief.get("options_context_included", False))
@@ -373,7 +383,7 @@ def assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
                     canonical["ledger_levels"], conf, by_id)
 
     return {
-        "report_id": f"AF-{report_date.replace('-', '')}-{ticker}",
+        "report_id": f"AF-{rid_stamp}-{ticker}",
         "title": brief.get("title", f"{instrument} ({ticker})"),
         "subtitle": brief.get("subtitle", f"{meta['venue']} - {meta['prediction_window_start_report_tz']}"
                     f" -> {meta['prediction_window_end_report_tz']}"),
@@ -677,7 +687,8 @@ def main():
                                           levels=[l["value"] for l in levels])
 
     payload = assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
-                       setups, ladder, ledger_levels, conf, asset_class, regime, pred_type)
+                       setups, ladder, ledger_levels, conf, asset_class, regime, pred_type,
+                       as_of_dt=now_dt)
 
     predictions = {
         "report_id": payload["report_id"], "instrument": payload["meta"]["instrument"],

@@ -166,9 +166,21 @@ class TestHardCaps(unittest.TestCase):
         self.assertLessEqual(out["capped"], 65)
         self.assertIn("engine_errors->65", out["caps_applied"])
 
-    def test_unsupported_thesis_cap_55(self):
+    def test_single_source_thesis_cap_65(self):
+        # a single-source thesis claim is a yellow flag (65), NOT a near-neutral pin (55) —
+        # this is the fix for confidence being "always 55" on technically-led calls.
         brief = {"primary_prediction": {"type": "breakout"},
                  "claims": [{"claim": "rumor", "status": "single-source",
+                             "used_in_thesis": True, "source": "x"}]}
+        out = C.compute_confidence(_clean_analysis(), _clean_setup(), brief=brief)
+        self.assertLessEqual(out["capped"], 65)
+        self.assertIn("single_source_thesis->65", out["caps_applied"])
+
+    def test_unverified_thesis_cap_55_defence_in_depth(self):
+        # unverified/stale claims must never drive a thesis (the brief validator blocks
+        # them); if a malformed brief reaches here, hold the harder 55 floor.
+        brief = {"primary_prediction": {"type": "breakout"},
+                 "claims": [{"claim": "rumor", "status": "unverified",
                              "used_in_thesis": True, "source": "x"}]}
         out = C.compute_confidence(_clean_analysis(), _clean_setup(), brief=brief)
         self.assertLessEqual(out["capped"], 55)
@@ -264,6 +276,16 @@ class TestLedgerConfidence(unittest.TestCase):
         frac, _ = C.ledger_confidence({"instrument_hit_rate": 0.70,
                                        "historical_prediction_count": 10})
         self.assertAlmostEqual(pct, frac, places=6)
+
+    def test_instrument_drives_over_broad_asset_class(self):
+        # the instrument's OWN strong record should dominate a large but weaker class
+        # sample (learn per-stock): asset-class weight is capped, so it can't drown it.
+        score, detail = C.ledger_confidence({
+            "instrument_hit_rate": 80, "historical_prediction_count": 10,
+            "asset_class_hit_rate": 50, "asset_class_count": 200})
+        self.assertGreater(score, 0.7)   # ~instrument's 0.8, not pulled to the class 0.5
+        cls = next(b for b in detail["blend"] if b["basis"] == "asset_class")
+        self.assertEqual(cls["weight"], C.CLASS_PRIOR_MAX_W)
 
 
 class TestDivisionGuards(unittest.TestCase):
