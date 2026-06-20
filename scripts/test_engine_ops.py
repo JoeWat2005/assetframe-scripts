@@ -495,6 +495,49 @@ class CommandQueue(unittest.TestCase):
     def test_reap_stale_commands_swallows_missing_table(self):
         E.reap_stale_commands(_MissingTableConn())   # must not raise if not migrated yet
 
+    def test_sync_assets_refuses_empty_universe(self):
+        # An empty engine_assets table must NEVER overwrite config/assets.json with nothing.
+        c = FakeConn({"from engine_assets": []})
+        ok, result, _l, _r = E._cmd_sync_assets(c, {})
+        self.assertFalse(ok)
+        self.assertIn("empty", (result or "").lower())
+
+    def test_sync_assets_none_when_table_missing(self):
+        ok, result, _l, _r = E._cmd_sync_assets(_MissingTableConn(), {})
+        self.assertFalse(ok)
+        self.assertIn("not migrated", (result or "").lower())
+
+    def test_reset_ledger_keeps_only_header(self):
+        import tempfile
+        import shutil
+        d = Path(tempfile.mkdtemp())
+        try:
+            (d / "ledger").mkdir()
+            (d / "ledger" / "outcome_ledger.csv").write_text("report_id,hits\nAF-1,2\nAF-2,3\n", encoding="utf-8")
+            with mock.patch.object(E, "ROOT", d):
+                ok, _result, _l, _r = E._cmd_reset_ledger(None, {})
+            self.assertTrue(ok)
+            self.assertEqual((d / "ledger" / "outcome_ledger.csv").read_text(encoding="utf-8").strip(), "report_id,hits")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_clear_reports_empties_working_dirs(self):
+        import tempfile
+        import shutil
+        d = Path(tempfile.mkdtemp())
+        try:
+            (d / "reports" / "2026-06-20" / "BTC").mkdir(parents=True)
+            (d / "reports" / "2026-06-20" / "BTC" / "free.pdf").write_text("x", encoding="utf-8")
+            (d / "runs").mkdir()
+            (d / "runs" / "m.json").write_text("{}", encoding="utf-8")
+            with mock.patch.object(E, "ROOT", d), mock.patch.object(E, "_FileLock", _NoLock):
+                ok, _result, _l, _r = E._cmd_clear_reports(None, {})
+            self.assertTrue(ok)
+            self.assertEqual(list((d / "reports").iterdir()), [])
+            self.assertEqual(list((d / "runs").iterdir()), [])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_poller_drain_commands_returns_restart(self):
         cmd = {"id": "cX", "command": "restart_poller", "args": {}}
         _claims = [[cmd]]   # claimable ONCE, then the queue is empty (no infinite loop)

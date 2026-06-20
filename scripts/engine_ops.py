@@ -868,12 +868,130 @@ def _cmd_set_config(conn, args):
     return True, f"set {key} (restart the poller for it to take effect)", None, False
 
 
+def _cmd_sync_assets(conn, args):
+    """Pull the asset universe from Neon (engine_assets, the dashboard's source of truth) and write
+    it to config/assets.json — but ONLY after config_loader validates it. A bad/empty universe NEVER
+    replaces the good config, so the dashboard can't break generation. Held under the run lock so it
+    never races a generation reading the file."""
+    try:
+        rows = conn.execute(
+            "SELECT id, name, instrument, ticker, provider_symbols, asset_class, session_profile, "
+            "cadence, timezone, roll_utc, related, forecast_window, publish_policy, report_tier, enabled "
+            "FROM engine_assets ORDER BY sort_order, id").fetchall()
+    except psycopg.errors.UndefinedTable:
+        return False, "engine_assets table not migrated yet (run npm run migrate:up)", None, False
+    except Exception as ex:
+        return False, f"could not read engine_assets: {ex}"[:200], None, False
+    if not rows:
+        return False, "engine_assets is empty — refusing to write an empty universe", None, False
+    assets = []
+    for r in rows:
+        ps = r.get("provider_symbols")
+        if isinstance(ps, str):
+            try:
+                ps = json.loads(ps)
+            except Exception:
+                ps = {}
+        assets.append({
+            "id": r.get("id"), "name": r.get("name"), "instrument": r.get("instrument"),
+            "ticker": r.get("ticker"), "provider_symbols": ps or {}, "asset_class": r.get("asset_class"),
+            "session_profile": r.get("session_profile"), "cadence": r.get("cadence"),
+            "timezone": r.get("timezone"), "roll_utc": r.get("roll_utc"), "related": r.get("related") or "",
+            "forecast_window": r.get("forecast_window"), "publish_policy": r.get("publish_policy"),
+            "report_tier": r.get("report_tier"), "enabled": bool(r.get("enabled")),
+        })
+    cfg = ROOT / "config" / "assets.json"
+    tmp = ROOT / "config" / "assets.json.tmp"
+    try:
+        with _FileLock(LOCK_PATH, blocking=False):
+            tmp.write_text(json.dumps({"assets": assets}, indent=2), encoding="utf-8")
+            if str(SCRIPTS) not in sys.path:
+                sys.path.insert(0, str(SCRIPTS))
+            import config_loader   # validates taxonomy/session/cadence/tz enums; raises on any bad asset
+            config_loader.load_assets(tmp)   # <- the safety gate: a bad universe raises here
+            os.replace(tmp, cfg)             # atomic; only reached if validation passed
+    except _FileLock.Locked:
+        return False, "another run is in progress — retry sync_assets shortly", None, False
+    except Exception as ex:
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+        return False, f"validation failed — kept the existing config. {str(ex)[:240]}", None, False
+    enabled = sum(1 for a in assets if a["enabled"])
+    return True, f"synced {len(assets)} assets to config/assets.json ({enabled} enabled)", None, False
+
+
+def _cmd_reset_ledger(conn, args):
+    """Truncate ledger/outcome_ledger.csv to its header row — starts the track record fresh. The box
+    runs the poller, so this works without SSH/sudo. (Neon scored_results is cleared separately.)"""
+    p = ROOT / "ledger" / "outcome_ledger.csv"
+    try:
+        if not p.exists():
+            return True, "no ledger file — nothing to reset", None, False
+        lines = p.read_text(encoding="utf-8").splitlines()
+        header = lines[0] if lines else ""
+        tmp = ROOT / "ledger" / "outcome_ledger.csv.tmp"
+        tmp.write_text((header + "\n") if header else "", encoding="utf-8")
+        os.replace(tmp, p)
+        return True, f"ledger reset to header ({len(lines) - 1 if lines else 0} rows cleared)", None, False
+    except Exception as ex:
+        return False, f"could not reset ledger: {ex}"[:200], None, False
+
+
+def _cmd_clear_reports(conn, args):
+    """Clear the engine's working dirs (reports/data/content/runs) on the box — a dashboard-driven
+    system refresh, so you never need SSH + sudo. The ledger is NOT touched (use reset_ledger).
+    Held under the run lock so it never deletes mid-generation."""
+    import shutil
+    subdirs = ["reports", "data/payloads", "data/predictions", "data/analysis", "data/candles",
+               "content", "runs"]
+    cleared = []
+    try:
+        with _FileLock(LOCK_PATH, blocking=False):
+            for sub in subdirs:
+                d = ROOT / sub
+                if not d.is_dir():
+                    continue
+                for child in d.iterdir():
+                    try:
+                        if child.is_dir():
+                            shutil.rmtree(child, ignore_errors=True)
+                        else:
+                            child.unlink()
+                    except Exception:
+                        pass
+                cleared.append(sub)
+    except _FileLock.Locked:
+        return False, "another run is in progress — retry clear_reports shortly", None, False
+    return True, f"cleared working dirs: {', '.join(cleared) or '(none present)'}", None, False
+
+
+def _cmd_run_scoring(conn, args):
+    """Run run_daily --mode score_only: grade any closed prediction windows into the ledger WITHOUT
+    generating new reports. Held under the run lock. Use it to push the track record forward on demand."""
+    try:
+        with _FileLock(LOCK_PATH, blocking=False):
+            p = subprocess.run([sys.executable, str(RUN_DAILY), "--mode", "score_only"],
+                               cwd=str(ROOT), capture_output=True, text=True, timeout=900)
+    except _FileLock.Locked:
+        return False, "another run is in progress — retry run_scoring shortly", None, False
+    out = ((p.stdout or "") + (p.stderr or "")).strip()
+    if p.returncode == 0:
+        return True, "scoring run complete (score_only)", _tail(out, 2000), False
+    return False, f"scoring run exited {p.returncode}", _tail(out, 2000), False
+
+
 _COMMAND_HANDLERS = {
     "restart_poller": _cmd_restart_poller,
     "pull_latest": _cmd_pull_latest,
     "run_maintenance": _cmd_run_maintenance,
     "tail_logs": _cmd_tail_logs,
     "set_config": _cmd_set_config,
+    "sync_assets": _cmd_sync_assets,
+    "reset_ledger": _cmd_reset_ledger,
+    "clear_reports": _cmd_clear_reports,
+    "run_scoring": _cmd_run_scoring,
 }
 
 # Canonical allow-list (the web keeps its own copy for defence in depth; this is the boundary).
