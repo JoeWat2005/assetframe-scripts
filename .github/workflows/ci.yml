@@ -55,6 +55,9 @@ jobs:
             # --ff-only refuses (rather than destroys) if the tree ever diverged.
             git fetch --prune origin
             git checkout "$3"
+            # Discard the box's local sync_assets edits to the git-tracked config/assets.json so the
+            # ff-only pull can't fail on a dirty tree; the poller re-syncs config from Neon on restart.
+            git checkout -- config/assets.json || true
             git pull --ff-only origin "$3"
             .venv/bin/pip install -r requirements.txt --quiet
             npm install --omit=dev --no-audit --no-fund

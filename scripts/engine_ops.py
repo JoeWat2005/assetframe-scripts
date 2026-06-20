@@ -769,6 +769,14 @@ def _cmd_pull_latest(conn, args):
     logs = []
     try:
         with _FileLock(LOCK_PATH, blocking=False):
+            # Discard the box's local sync_assets edits to the git-tracked config/assets.json so the
+            # ff-only pull can't fail on a dirty tree. Best-effort (no-op if clean/untracked); the
+            # poller re-syncs config from Neon on restart, so nothing is lost.
+            try:
+                subprocess.run(["git", "checkout", "--", "config/assets.json"], cwd=str(ROOT),
+                               capture_output=True, text=True, timeout=60)
+            except Exception:
+                pass
             for cmd in steps:
                 try:
                     p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=600)
@@ -868,22 +876,23 @@ def _cmd_set_config(conn, args):
     return True, f"set {key} (restart the poller for it to take effect)", None, False
 
 
-def _cmd_sync_assets(conn, args):
-    """Pull the asset universe from Neon (engine_assets, the dashboard's source of truth) and write
-    it to config/assets.json — but ONLY after config_loader validates it. A bad/empty universe NEVER
-    replaces the good config, so the dashboard can't break generation. Held under the run lock so it
-    never races a generation reading the file."""
+def _sync_assets_from_neon(conn):
+    """Rebuild config/assets.json from Neon engine_assets (the dashboard's source of truth) — but
+    ONLY after config_loader validates it. Atomic; a bad/empty universe NEVER replaces the good
+    config, so the dashboard can't break generation. Returns (ok: bool, message: str). Called by the
+    sync_assets command AND on poller startup, so after ANY deploy/restart the box's config reflects
+    the dashboard (and the git-tracked config/assets.json default is just a bootstrap)."""
     try:
         rows = conn.execute(
             "SELECT id, name, instrument, ticker, provider_symbols, asset_class, session_profile, "
             "cadence, timezone, roll_utc, related, forecast_window, publish_policy, report_tier, enabled "
             "FROM engine_assets ORDER BY sort_order, id").fetchall()
     except psycopg.errors.UndefinedTable:
-        return False, "engine_assets table not migrated yet (run npm run migrate:up)", None, False
+        return False, "engine_assets not migrated yet"
     except Exception as ex:
-        return False, f"could not read engine_assets: {ex}"[:200], None, False
+        return False, f"could not read engine_assets: {ex}"[:200]
     if not rows:
-        return False, "engine_assets is empty — refusing to write an empty universe", None, False
+        return False, "engine_assets is empty — kept the existing config"
     assets = []
     for r in rows:
         ps = r.get("provider_symbols")
@@ -911,15 +920,21 @@ def _cmd_sync_assets(conn, args):
             config_loader.load_assets(tmp)   # <- the safety gate: a bad universe raises here
             os.replace(tmp, cfg)             # atomic; only reached if validation passed
     except _FileLock.Locked:
-        return False, "another run is in progress — retry sync_assets shortly", None, False
+        return False, "another run is in progress — config not synced"
     except Exception as ex:
         try:
             tmp.unlink()
         except Exception:
             pass
-        return False, f"validation failed — kept the existing config. {str(ex)[:240]}", None, False
+        return False, f"validation failed — kept the existing config. {str(ex)[:240]}"
     enabled = sum(1 for a in assets if a["enabled"])
-    return True, f"synced {len(assets)} assets to config/assets.json ({enabled} enabled)", None, False
+    return True, f"synced {len(assets)} assets to config/assets.json ({enabled} enabled)"
+
+
+def _cmd_sync_assets(conn, args):
+    """Rebuild config/assets.json from the dashboard's engine_assets (validated before it applies)."""
+    ok, msg = _sync_assets_from_neon(conn)
+    return ok, msg, None, False
 
 
 def _cmd_reset_ledger(conn, args):
