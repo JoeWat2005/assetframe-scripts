@@ -79,9 +79,25 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 PROVIDER_DEFAULT = os.environ.get("ADVISOR_DATA_PROVIDER", "yahoo")
 
 
-def _http_json(url):
-    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30) as r:
-        return json.load(r)
+def _http_json(url, retries=2, backoff=1.0):
+    """GET + parse JSON with a bounded retry. A single transient blip (timeout, 5xx, connection
+    reset) used to silently degrade an asset to daily-only analysis; now we retry with backoff
+    (1s, 2s). A 4xx (bad symbol / unauthorized) fails fast — retrying won't help."""
+    import time as _t
+    last = None
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as ex:
+            if ex.code and 400 <= ex.code < 500:
+                raise   # client error (bad symbol / auth) — no point retrying
+            last = ex
+        except Exception as ex:
+            last = ex
+        if attempt < retries:
+            _t.sleep(backoff * (2 ** attempt))
+    raise last
 
 
 def yahoo_chart(symbol, interval, rng):
