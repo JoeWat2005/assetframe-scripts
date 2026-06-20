@@ -474,8 +474,23 @@ def main():
             for f in as_completed(futs):
                 rec = f.result()
                 jobs.append(rec)
+                # Surface WHY an asset didn't generate (needs_brief / brief_rejected /
+                # *_error) on the status line so the reason reaches the run log_excerpt and the
+                # admin console — otherwise a failure shows only "needs_brief" with no diagnosis.
+                note = ""
+                if rec["status"] not in ("generated", "forecast_only"):
+                    bits = []
+                    if rec.get("critic_decision"):
+                        bits.append(f"critic={rec['critic_decision']}")
+                    reason = rec.get("critic_summary")
+                    if not reason and rec.get("errors"):
+                        reason = "; ".join(str(e) for e in rec["errors"])
+                    if reason:
+                        bits.append(str(reason)[:240])
+                    if bits:
+                        note = "  ->  " + " | ".join(bits)
                 print(f"  {rec['ticker']:8} {rec['status']:14} "
-                      f"{rec.get('report_id') or ''} ({rec.get('duration_s')}s)")
+                      f"{rec.get('report_id') or ''} ({rec.get('duration_s')}s){note}")
         manifest["jobs"] = sorted(jobs, key=lambda r: r["asset_id"])
         manifest["generated"] = sum(1 for j in jobs if j["status"] in ("generated", "forecast_only"))
         manifest["needs_brief"] = [j["ticker"] for j in jobs if j["status"] == "needs_brief"]

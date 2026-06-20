@@ -44,9 +44,12 @@ from pathlib import Path
 
 # Latest capable Claude model — kept as a single constant so it is trivial to bump.
 DEFAULT_MODEL = "claude-opus-4-8"
-DEFAULT_MAX_TOKENS = 16000  # a full brief is ~7k tok of JSON and web_search tool turns
+DEFAULT_MAX_TOKENS = 20000  # a full brief is ~7k tok of JSON and web_search tool turns
                             # share this budget; 8000 truncated the JSON mid-object ->
-                            # parse/validation fail -> needs_brief (see req-8104b5f4).
+                            # parse/validation fail -> needs_brief (see req-8104b5f4). Raised
+                            # 16000 -> 20000 for headroom: web_search-heavy briefs can still
+                            # approach 16k across tool turns; a truncation now reports
+                            # stop_reason==max_tokens so it is diagnosable.
 # Per-million-token USD prices used only for the stderr cost estimate (best-effort;
 # the ledger records the live `usage` numbers, not this estimate). Override via env.
 PRICE_IN_PER_MTOK = float(os.environ.get("ANTHROPIC_PRICE_IN", "5.0"))
