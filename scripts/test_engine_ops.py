@@ -114,6 +114,20 @@ class ScopeMapping(unittest.TestCase):
             E.scope_to_run_args({"assets": ["aapl", None]}),
             ["--mode", "production", "--asset", "aapl"])
 
+    def test_as_of_appended_when_valid(self):
+        self.assertEqual(
+            E.scope_to_run_args({"assets": ["btc"], "as_of": "2026-06-17 12:00"}),
+            ["--mode", "production", "--asset", "btc", "--as-of", "2026-06-17 12:00"])
+        self.assertEqual(
+            E.scope_to_run_args({"all_due": True, "as_of": "2026-06-17 12:00"}),
+            ["--mode", "production", "--as-of", "2026-06-17 12:00"])
+
+    def test_as_of_ignored_when_malformed_or_empty(self):
+        self.assertEqual(
+            E.scope_to_run_args({"assets": ["btc"], "as_of": "garbage"}),
+            ["--mode", "production", "--asset", "btc"])
+        self.assertEqual(E.scope_to_run_args({"all_due": True, "as_of": ""}), ["--mode", "production"])
+
 
 # ------------------------------------------------------- engine_state SQL
 class StateSql(unittest.TestCase):

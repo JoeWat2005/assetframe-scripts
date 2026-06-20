@@ -261,16 +261,22 @@ def scope_to_run_args(scope):
         except Exception:
             scope = {}
     scope = scope or {}
-    assets = scope.get("assets")
-    if assets:
-        args = ["--mode", "production"]
-        for a in assets:
-            if a is None:
-                continue
-            args += ["--asset", str(a).strip().lower()]
-        return args
-    # {"all_due": true} or anything else -> the scheduled-style full batch.
-    return ["--mode", "production"]
+    args = ["--mode", "production"]
+    for a in (scope.get("assets") or []):
+        if a is None:
+            continue
+        args += ["--asset", str(a).strip().lower()]
+    # Optional BACKDATE: generate a report AS-OF a past time so its prediction window has already
+    # closed — lets you test scoring / the ledger immediately instead of waiting for the window.
+    # Validated to run_daily's exact "YYYY-MM-DD HH:MM" format (a bad value is ignored, never passed).
+    as_of = scope.get("as_of")
+    if isinstance(as_of, str) and as_of.strip():
+        try:
+            datetime.strptime(as_of.strip()[:16], "%Y-%m-%d %H:%M")
+            args += ["--as-of", as_of.strip()[:16]]
+        except ValueError:
+            pass
+    return args
 
 
 # --------------------------------------------------------------- manifest parse
