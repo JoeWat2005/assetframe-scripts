@@ -68,10 +68,38 @@ def _drain(conn):
     return last
 
 
+def _drain_commands(conn):
+    """Claim and run EVERY queued admin box-command (restart/pull/maintenance/logs/config) until
+    the queue is empty. Returns True if a command asked the poller to restart — the caller then
+    self-exits and systemd Restart=always relaunches it (the only restart path, since the poller
+    can't sudo). Commands are drained at the TOP of a tick, before generation, so a restart is only
+    ever handled when no generation subprocess is running (single-threaded loop)."""
+    while not _STOP:
+        row = engine_ops.claim_next_command(conn)
+        if not row:
+            break
+        cmd = (row.get("command") or "").strip()
+        _log(f"claimed command {row.get('id')} -> {cmd}")
+        res = engine_ops.run_command(conn, row)
+        _log(f"command {row.get('id')} {cmd} -> {res.get('status')}: {res.get('result')}")
+        if res.get("restart"):
+            return True
+    return False
+
+
 def tick(conn):
-    """One Neon service pass on an open connection: stamp the Neon heartbeat and drain the queue.
-    The cheap idle Upstash heartbeat + wake-check happens in loop()/run_once() BEFORE Neon opens."""
+    """One Neon service pass on an open connection: stamp the Neon heartbeat, drain admin commands,
+    then drain the generation queue. The cheap idle Upstash heartbeat + wake-check happens in
+    loop()/run_once() BEFORE Neon opens."""
+    global _STOP
     engine_ops.heartbeat(conn)
+    if _drain_commands(conn):
+        # A restart/pull command ran: record-then-exit so systemd relaunches us (onto new code if
+        # pull_latest ran). Skip the generation drain this tick; the queued run is picked up after
+        # relaunch. Setting _STOP returns cleanly from loop() -> systemd restarts (it didn't stop us).
+        _log("restart requested by admin command — exiting for systemd to relaunch")
+        _STOP = True
+        return None
     return _drain(conn)
 
 
@@ -100,6 +128,7 @@ def loop(interval):
     _log(f"starting — interval={interval}s; work signal via {using}. "
          f"Manual requests run even when paused; the daily timer respects the pause flag.")
     n = 0
+    reaped = False
     while not _STOP:
         t0 = time.time()
         n += 1
@@ -111,6 +140,11 @@ def loop(interval):
             if do_neon:
                 with engine_ops.connect() as conn:
                     engine_ops.clear_wake()   # going to Neon now; a request enqueued mid-drain re-sets it
+                    if not reaped:
+                        # First Neon pass of this process: clear any phantom 'running' command left
+                        # by the process we just replaced (e.g. a restart command).
+                        engine_ops.reap_stale_commands(conn)
+                        reaped = True
                     tick(conn)
         except engine_ops.ConfigError as ex:
             # No DATABASE_URL is not transient — fail loudly so systemd surfaces it.

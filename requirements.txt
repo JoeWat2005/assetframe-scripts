@@ -13,6 +13,9 @@ psycopg[binary]>=3.1
 # ASSETFRAME_AUTHOR_BRIEFS is on AND ANTHROPIC_API_KEY is set.
 anthropic>=0.40
 
-# Optional - only needed to auto-upload Pro files to Cloudflare R2 (scripts/publish.py).
-# The free site and local builds do not need this.  pip install boto3
-# boto3>=1.34
+# Cloudflare R2 upload client for scripts/publish.py. REQUIRED on the autonomous engine
+# box: the daily run's publish step (engine_ops._publish_chain) pushes Pro/free files to
+# R2, and without it publish exits 2 ("boto3 is required") so the generate -> publish ->
+# sync chain halts before anything reaches R2 or Neon. (Local free-only builds never call
+# publish, but installing it is harmless.)
+boto3>=1.34

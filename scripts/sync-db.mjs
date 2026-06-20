@@ -3,7 +3,9 @@
 // Applies to EVERY configured target so one publish updates prod AND the dev branch:
 //   DATABASE_URL        (primary / production — Neon main branch)
 //   DATABASE_URL_DEV    (optional — Neon `development` branch, used by preview deploys)
-// Each target: upserts editions, replaces the track-record snapshot (open calls + scored).
+// Each target: incrementally UPSERTS editions, open calls (+ predictions) and the scored
+// track record. Every write is keyed and idempotent — there is no global DELETE, so a
+// partial or empty export can never wipe published history (the append-only promise).
 import { neon } from "@neondatabase/serverless";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -43,9 +45,12 @@ if (targets.length === 0) {
   process.exit(1);
 }
 
-// Wipe-foot-gun guard: syncOne snapshot-replaces open_calls + scored_results, so syncing
-// empty/missing content would wipe the track record. Refuse up front — before any DB is
-// touched — if catalog.json is absent or has zero editions. Run export_content.py first.
+// Sanity guard (NOT a wipe guard any more): the sync is fully incremental — upserts only,
+// never a global DELETE — so empty/partial content is a harmless no-op and can no longer
+// wipe the track record. We still refuse on a MISSING or CORRUPT catalog.json, because that
+// signals export_content.py didn't run / broke. But a *zero-edition* catalog now PROCEEDS:
+// it lets the scored track record (scored_results) sync on days that produced no new edition
+// — the previous "zero editions" abort was exactly why scored rows never reached Neon.
 let guardCatalog;
 try {
   guardCatalog = readJson("catalog.json");
@@ -53,9 +58,12 @@ try {
   console.error(`Refusing to sync — cannot read content/catalog.json (${err.message}). Run \`python scripts/export_content.py\` first.`);
   process.exit(1);
 }
-if (!Array.isArray(guardCatalog) || guardCatalog.length === 0) {
-  console.error("Refusing to sync — content/catalog.json has zero editions (syncing empty content would wipe the track record). Run `python scripts/export_content.py` first.");
+if (!Array.isArray(guardCatalog)) {
+  console.error("Refusing to sync — content/catalog.json is not an array (corrupt export). Run `python scripts/export_content.py` first.");
   process.exit(1);
+}
+if (guardCatalog.length === 0) {
+  console.warn("Note: catalog.json has zero editions — proceeding anyway (incremental upsert is non-destructive; the scored track record still syncs).");
 }
 
 // Schema is owned by node-pg-migrate (web/migrations). Run `npm run migrate:up` first
@@ -63,10 +71,15 @@ if (!Array.isArray(guardCatalog) || guardCatalog.length === 0) {
 async function syncOne(label, url) {
   const sql = neon(url);
 
-  // 1. editions (upsert)
+  // 1. editions (upsert). Per-row try/catch (like the track-record loop below) so a single
+  // malformed edition can't throw out of syncOne and skip the whole track-record section — the
+  // scored history must still propagate even if one edition row is bad (or a transient HTTP blip
+  // hits one upsert). Nothing is deleted; a failed row is counted and surfaced at the end.
   const catalog = readJson("catalog.json");
+  let editionFailures = 0;
   for (const e of catalog) {
     const id = `${e.date}/${e.slug}`;
+    try {
     await sql.query(
       // Approval gate: `hidden` is set ONLY on INSERT — it is deliberately NOT in the
       // DO UPDATE SET list, so re-running sync never flips an admin's later un-hide
@@ -97,51 +110,136 @@ async function syncOne(label, url) {
        // Approval gate (INSERT-only above). Default hidden when export omits the flag.
        e.hidden === false ? false : true]
     );
-  }
-
-  // 2. track record (snapshot — replace open_calls + predictions + scored_results)
-  const track = readJson("track-record.json");
-  await sql.query("DELETE FROM open_calls"); // cascades to open_call_predictions
-  let predCount = 0;
-  for (const c of track.open || []) {
-    await sql.query(
-      `INSERT INTO open_calls (report_id, instrument, symbol, view, confidence, window_end, n, n_manual, hits, scored)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [c.reportId, c.instrument, c.symbol, c.view, String(c.confidence), c.windowEnd, c.n || 0, c.nManual || 0,
-       c.hits || 0, !!c.scored]
-    );
-    const preds = c.predictions || [];
-    for (let i = 0; i < preds.length; i++) {
-      const p = preds[i];
-      await sql.query(
-        `INSERT INTO open_call_predictions (report_id, seq, pred_id, type, text, manual, expect,
-           pred_type, verdict, setup_side)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-         ON CONFLICT (report_id, pred_id) DO UPDATE SET
-           seq=excluded.seq, type=excluded.type, text=excluded.text,
-           manual=excluded.manual, expect=excluded.expect,
-           pred_type=excluded.pred_type, verdict=excluded.verdict, setup_side=excluded.setup_side`,
-        [c.reportId, i + 1, p.id || `P${i + 1}`, p.type || "", p.text || "",
-         !!p.manual, typeof p.expect === "boolean" ? p.expect : null,
-         // T12 (additive) — verdict + predType are emitted by export_content; setup_side is reserved.
-         orNull(p.predType), orNull(p.verdict), orNull(p.setupSide)]
-      );
-      predCount++;
+    } catch (err) {
+      editionFailures++;
+      console.error(`  [${label}] edition ${id} FAILED: ${err.message}`);
     }
   }
-  await sql.query("DELETE FROM scored_results");
-  for (const r of track.scored || []) {
-    await sql.query(
-      `INSERT INTO scored_results (report_id, instrument, view, confidence, results, hits, misses, hit_rate, window_end,
-         conf_version, confidence_components)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-      [r.reportId || null, r.instrument, r.view, String(r.confidence), r.results,
-       toInt(r.hits), toInt(r.misses), String(r.hitRate), r.windowEnd,
-       // T12 (additive) — present only when export_content emits them.
-       toInt(r.confVersion), toJson(r.confidenceComponents)]
-    );
+
+  // 2. track record — INCREMENTAL UPSERT (no global DELETE; every write is keyed + idempotent):
+  //    - open_calls            ON CONFLICT (report_id)            [PK]
+  //    - open_call_predictions ON CONFLICT (report_id, pred_id)   + a per-report prune of
+  //                            predictions that vanished from THAT report (scoped — never
+  //                            touches other reports)
+  //    - scored_results        ON CONFLICT (report_id)            [the append-only TRACK RECORD —
+  //                            rows are only inserted or refreshed in place, NEVER deleted]
+  //  The old DELETE+INSERT was the wipe foot-gun: non-transactional on the HTTP driver, a crash
+  //  between the DELETE and the re-INSERT left the track record empty, and a partial/empty export
+  //  replaced good history with nothing. Upsert-only removes both failure modes entirely.
+  const track = readJson("track-record.json");
+
+  // scored_results has no natural key in the baseline schema (bigserial PK only), so its upsert
+  // needs a unique target. report_id is unique per scored report (one append-only ledger row per
+  // closed window). The CANONICAL definition is the web migration (web/migrations/
+  // 1750000019000_scored-results-upsert-key.js); this IF-NOT-EXISTS create is a belt-and-suspenders
+  // for the two-repo split so the engine can still upsert against a Neon branch whose migrations
+  // lag. It is a no-op once the migration has run (same index name).
+  try {
+    // Dedupe FIRST (keep max(id) per report_id) so the unique index can build even if a legacy
+    // duplicate slipped in via the old constraint-free INSERT path — byte-aligned with
+    // web/migrations/1750000019000. No-op on clean data (and on the empty pre-launch table).
+    await sql.query("DELETE FROM scored_results a USING scored_results b WHERE a.report_id IS NOT NULL AND a.report_id = b.report_id AND a.id < b.id");
+    await sql.query("CREATE UNIQUE INDEX IF NOT EXISTS scored_results_report_id_uniq ON scored_results (report_id)");
+  } catch (err) {
+    console.warn(`  [${label}] could not ensure scored_results unique index (${err.message}); the scored upsert may fail — run \`npm run migrate:up\`.`);
   }
-  console.log(`  [${label}] editions: ${catalog.length}, open_calls: ${(track.open || []).length} (${predCount} predictions), scored_results: ${(track.scored || []).length}`);
+
+  let predCount = 0;
+  let trackFailures = 0;
+  for (const c of track.open || []) {
+    if (!c.reportId) { console.warn(`  [${label}] open call with no reportId skipped (${c.instrument || "?"})`); continue; }
+    try {
+      await sql.query(
+        `INSERT INTO open_calls (report_id, instrument, symbol, view, confidence, window_end, n, n_manual, hits, scored)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         ON CONFLICT (report_id) DO UPDATE SET
+           instrument=excluded.instrument, symbol=excluded.symbol, view=excluded.view,
+           confidence=excluded.confidence, window_end=excluded.window_end, n=excluded.n,
+           n_manual=excluded.n_manual, hits=excluded.hits, scored=excluded.scored`,
+        [c.reportId, c.instrument, c.symbol, c.view, String(c.confidence), c.windowEnd, c.n || 0, c.nManual || 0,
+         c.hits || 0, !!c.scored]
+      );
+      const preds = c.predictions || [];
+      const keepIds = [];
+      for (let i = 0; i < preds.length; i++) {
+        const p = preds[i];
+        const predId = p.id || `P${i + 1}`;
+        keepIds.push(predId);
+        await sql.query(
+          `INSERT INTO open_call_predictions (report_id, seq, pred_id, type, text, manual, expect,
+             pred_type, verdict, setup_side)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           ON CONFLICT (report_id, pred_id) DO UPDATE SET
+             seq=excluded.seq, type=excluded.type, text=excluded.text,
+             manual=excluded.manual, expect=excluded.expect,
+             pred_type=excluded.pred_type, verdict=excluded.verdict, setup_side=excluded.setup_side`,
+          [c.reportId, i + 1, predId, p.type || "", p.text || "",
+           !!p.manual, typeof p.expect === "boolean" ? p.expect : null,
+           // T12 (additive) — verdict + predType are emitted by export_content; setup_side is reserved.
+           orNull(p.predType), orNull(p.verdict), orNull(p.setupSide)]
+        );
+        predCount++;
+      }
+      // Prune predictions that disappeared from THIS report only (replaces the old cascade from
+      // DELETE FROM open_calls). Upserts ran first, so a crash here leaves extra/stale rows, never
+      // missing ones. An empty incoming set clears any leftovers for this report.
+      if (keepIds.length) {
+        await sql.query(
+          "DELETE FROM open_call_predictions WHERE report_id = $1 AND NOT (pred_id = ANY($2::text[]))",
+          [c.reportId, keepIds]
+        );
+      } else {
+        await sql.query("DELETE FROM open_call_predictions WHERE report_id = $1", [c.reportId]);
+      }
+    } catch (err) {
+      // An open call whose parent edition isn't in this sync (e.g. a still-pending call for a
+      // report the catalog scoped out via --since, or whose edition is awaiting approval) hits the
+      // FK to editions(report_ref). That's expected — skip+warn WITHOUT failing the run, so a single
+      // out-of-window pending call can't poison the exit code (and block) every sync. Other errors
+      // are real failures.
+      if (/foreign key/i.test(err.message || "")) {
+        console.warn(`  [${label}] open_call ${c.reportId} skipped — its edition isn't in this sync (FK).`);
+      } else {
+        trackFailures++;
+        console.error(`  [${label}] open_call ${c.reportId} FAILED: ${err.message}`);
+      }
+    }
+  }
+
+  let scoredCount = 0;
+  for (const r of track.scored || []) {
+    // A scored row with no report_id can't be upserted idempotently (every sync would duplicate
+    // it), so skip it. In practice the append-only ledger always carries report_id.
+    if (!r.reportId) { console.warn(`  [${label}] scored row with no reportId skipped (${r.instrument || "?"})`); continue; }
+    try {
+      await sql.query(
+        `INSERT INTO scored_results (report_id, instrument, view, confidence, results, hits, misses, hit_rate, window_end,
+           conf_version, confidence_components)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         ON CONFLICT (report_id) DO UPDATE SET
+           instrument=excluded.instrument, view=excluded.view, confidence=excluded.confidence,
+           results=excluded.results, hits=excluded.hits, misses=excluded.misses,
+           hit_rate=excluded.hit_rate, window_end=excluded.window_end,
+           conf_version=excluded.conf_version, confidence_components=excluded.confidence_components`,
+        [r.reportId, r.instrument, r.view, String(r.confidence), r.results,
+         toInt(r.hits), toInt(r.misses), String(r.hitRate), r.windowEnd,
+         // T12 (additive) — present only when export_content emits them.
+         toInt(r.confVersion), toJson(r.confidenceComponents)]
+      );
+      scoredCount++;
+    } catch (err) {
+      trackFailures++;
+      console.error(`  [${label}] scored_result ${r.reportId} FAILED: ${err.message}`);
+    }
+  }
+  console.log(`  [${label}] editions: ${catalog.length - editionFailures}/${catalog.length}, `
+    + `open_calls: ${(track.open || []).length} (${predCount} predictions), `
+    + `scored_results: ${scoredCount}/${(track.scored || []).length}`
+    + `${editionFailures + trackFailures ? `, ${editionFailures + trackFailures} row failure(s)` : ""}`);
+  // Surface partial failures as a failed sync (the outer loop exits 1) WITHOUT having wiped
+  // anything — the upserts that did land are preserved; a re-sync heals the rest. Crucially the
+  // track-record section ran regardless of edition failures, so scored history still propagated.
+  if (editionFailures + trackFailures) throw new Error(`${editionFailures + trackFailures} row(s) failed to sync`);
 }
 
 let failures = 0;

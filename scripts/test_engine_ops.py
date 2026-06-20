@@ -217,8 +217,14 @@ class PauseContract(unittest.TestCase):
         _claims = [[claimed]]
         c = FakeConn({
             "select automation_paused": [{"automation_paused": True}],
-            "set status = 'cancelled'": [],
-            "set status = 'running'": lambda _p: (_claims.pop(0) if _claims else []),
+            # tick() now drains the engine_commands queue (empty here) BEFORE the
+            # generation_requests queue — keys are table-qualified so the fake tells the two
+            # claim queries apart (in prod they hit different tables; the substring fake can't
+            # distinguish a bare "set status = 'running'").
+            "engine_commands set status = 'cancelled'": [],
+            "engine_commands set status = 'running'": [],
+            "generation_requests set status = 'cancelled'": [],
+            "generation_requests set status = 'running'": lambda _p: (_claims.pop(0) if _claims else []),
         })
         with mock.patch.object(poller.engine_ops, "run_and_record",
                                return_value="req-rX") as rar:
@@ -324,6 +330,193 @@ class DatabaseUrl(unittest.TestCase):
              mock.patch.object(E, "_load_dotenv_into_environ", lambda: None):
             with self.assertRaises(E.ConfigError):
                 E.connect()
+
+
+# ------------------------------------------------ engine_commands (box control)
+class _MissingTableConn(FakeConn):
+    """A connection whose every execute raises UndefinedTable — models the engine_commands
+    table not existing yet (migration 1750000020000 not applied on this branch)."""
+    def execute(self, sql, params=None):
+        raise E.psycopg.errors.UndefinedTable("relation \"engine_commands\" does not exist")
+
+
+class _NoLock:
+    """Stand-in for engine_ops._FileLock that always acquires (so command tests don't touch a
+    real .run.lock). Exposes .Locked so the handlers' `except _FileLock.Locked` stays valid."""
+    class Locked(Exception):
+        pass
+
+    def __init__(self, *a, **k):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class CommandQueue(unittest.TestCase):
+    """The engine_commands control channel: claim, dispatch, allow-list, restart gating."""
+
+    def setUp(self):
+        # tick()/_drain_commands read+set the module-global _STOP; isolate it per test.
+        self._stop = poller._STOP
+        poller._STOP = False
+
+    def tearDown(self):
+        poller._STOP = self._stop
+
+    def test_claim_command_drains_cancelled_then_claims_oldest(self):
+        claimed = {"id": "c2", "command": "restart_poller", "args": {}, "status": "running"}
+        c = FakeConn({
+            "engine_commands set status = 'cancelled'": [{"id": "c1"}],
+            "engine_commands set status = 'running'": [claimed],
+        })
+        row = E.claim_next_command(c)
+        self.assertEqual(row, claimed)
+        log = c.sql_log()
+        self.assertLess(log.index("set status = 'cancelled'"), log.index("set status = 'running'"))
+        self.assertIn("for update skip locked", log)
+        self.assertIn("order by created_at limit 1", log)
+        self.assertEqual(c.tx_depth, 0)   # balanced transactions
+
+    def test_claim_command_none_when_queue_empty(self):
+        c = FakeConn({"engine_commands set status = 'cancelled'": [],
+                      "engine_commands set status = 'running'": []})
+        self.assertIsNone(E.claim_next_command(c))
+
+    def test_claim_command_none_when_table_missing(self):
+        # Migration not applied yet -> UndefinedTable -> quiet None (no log spam, no crash).
+        self.assertIsNone(E.claim_next_command(_MissingTableConn()))
+
+    def test_run_command_unknown_verb_is_rejected(self):
+        c = FakeConn()
+        res = E.run_command(c, {"id": "c9", "command": "rm -rf /", "args": {}})
+        self.assertEqual(res["status"], "failed")
+        self.assertFalse(res["restart"])
+        sql, params = c.executed[-1]
+        self.assertIn("update engine_commands set status", sql.lower())
+        self.assertEqual(params[0], "failed")          # status recorded
+        self.assertIn("unknown command", (params[1] or ""))
+
+    def test_run_command_restart_poller_sets_restart(self):
+        c = FakeConn()
+        res = E.run_command(c, {"id": "c1", "command": "restart_poller", "args": {}})
+        self.assertEqual(res["status"], "done")
+        self.assertTrue(res["restart"])
+        self.assertEqual(c.executed[-1][1][0], "done")  # outcome recorded BEFORE any exit
+
+    def test_run_command_suppresses_restart_when_handler_fails(self):
+        # A handler that wants restart but reports failure must NOT trigger a restart.
+        c = FakeConn()
+        with mock.patch.dict(E._COMMAND_HANDLERS,
+                             {"boom": lambda conn, args: (False, "nope", None, True)}):
+            res = E.run_command(c, {"id": "c3", "command": "boom", "args": {}})
+        self.assertEqual(res["status"], "failed")
+        self.assertFalse(res["restart"])
+
+    def test_run_command_handler_exception_recorded_not_raised(self):
+        def _raiser(conn, args):
+            raise RuntimeError("kaboom")
+        c = FakeConn()
+        with mock.patch.dict(E._COMMAND_HANDLERS, {"boom": _raiser}):
+            res = E.run_command(c, {"id": "c4", "command": "boom", "args": {}})
+        self.assertEqual(res["status"], "failed")
+        self.assertFalse(res["restart"])
+        self.assertIn("command error", (c.executed[-1][1][1] or ""))
+
+    def test_run_maintenance_invokes_publish_chain(self):
+        c = FakeConn()
+        with mock.patch.object(E, "_FileLock", _NoLock), \
+             mock.patch.object(E, "_publish_chain", return_value=(True, None, "log tail")) as pc:
+            ok, result, log, restart = E._cmd_run_maintenance(c, {})
+        pc.assert_called_once()
+        self.assertTrue(ok)
+        self.assertFalse(restart)
+        self.assertEqual(log, "log tail")
+
+    def test_run_maintenance_reports_publish_failure(self):
+        c = FakeConn()
+        with mock.patch.object(E, "_FileLock", _NoLock), \
+             mock.patch.object(E, "_publish_chain", return_value=(False, "publish exited 2", "log")):
+            ok, result, _log, restart = E._cmd_run_maintenance(c, {})
+        self.assertFalse(ok)
+        self.assertIn("publish exited 2", result)
+
+    def test_set_config_allowlist_replace_and_reject(self):
+        import tempfile
+        import shutil
+        d = Path(tempfile.mkdtemp())
+        try:
+            with mock.patch.object(E, "ROOT", d):
+                # replaces an existing line, preserves others
+                (d / ".env").write_text("ASSETFRAME_AUTHOR_BRIEFS=0\nOTHER=keep\n", encoding="utf-8")
+                ok, _r, _l, _rs = E._cmd_set_config(None, {"key": "ASSETFRAME_AUTHOR_BRIEFS", "value": "1"})
+                self.assertTrue(ok)
+                txt = (d / ".env").read_text(encoding="utf-8")
+                self.assertIn("ASSETFRAME_AUTHOR_BRIEFS=1", txt)
+                self.assertNotIn("ASSETFRAME_AUTHOR_BRIEFS=0", txt)
+                self.assertIn("OTHER=keep", txt)
+                # disallowed key (e.g. a secret) is rejected
+                ok2, _r2, _l2, _rs2 = E._cmd_set_config(None, {"key": "DATABASE_URL", "value": "postgres://x"})
+                self.assertFalse(ok2)
+                self.assertNotIn("DATABASE_URL", (d / ".env").read_text(encoding="utf-8"))
+                # newline-injection value is rejected
+                ok3, _r3, _l3, _rs3 = E._cmd_set_config(None, {"key": "ASSETFRAME_AUTHOR_BRIEFS", "value": "a\nEVIL=1"})
+                self.assertFalse(ok3)
+                # per-key value validation: a non-integer / out-of-range ASSETFRAME_RUN_TIMEOUT is
+                # rejected (it is int()-parsed at import; a bad value would crash-loop the poller).
+                self.assertFalse(E._cmd_set_config(None, {"key": "ASSETFRAME_RUN_TIMEOUT", "value": "abc"})[0])
+                self.assertFalse(E._cmd_set_config(None, {"key": "ASSETFRAME_RUN_TIMEOUT", "value": "999999999"})[0])
+                self.assertFalse(E._cmd_set_config(None, {"key": "ASSETFRAME_RUN_TIMEOUT", "value": ""})[0])
+                self.assertTrue(E._cmd_set_config(None, {"key": "ASSETFRAME_RUN_TIMEOUT", "value": "300"})[0])
+                self.assertIn("ASSETFRAME_RUN_TIMEOUT=300", (d / ".env").read_text(encoding="utf-8"))
+                # a key removed from the allow-list is no longer settable
+                self.assertFalse(E._cmd_set_config(None, {"key": "ASSETFRAME_MAX_WORKERS", "value": "8"})[0])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_int_env_falls_back_on_garbage(self):
+        # A garbage value must NOT raise (that would crash the module at import -> systemd loop).
+        with mock.patch.dict(os.environ, {"AF_T": "abc"}, clear=False):
+            self.assertEqual(E._int_env("AF_T", 5400), 5400)
+        with mock.patch.dict(os.environ, {"AF_T": "120"}, clear=False):
+            self.assertEqual(E._int_env("AF_T", 5400), 120)
+        self.assertEqual(E._int_env("AF_DOES_NOT_EXIST_NOPE", 7), 7)
+
+    def test_reap_stale_commands_marks_running_failed(self):
+        c = FakeConn()
+        E.reap_stale_commands(c)
+        sql, _params = c.executed[-1]
+        self.assertIn("update engine_commands set status = 'failed'", sql.lower())
+        self.assertIn("where status = 'running'", sql.lower())
+
+    def test_reap_stale_commands_swallows_missing_table(self):
+        E.reap_stale_commands(_MissingTableConn())   # must not raise if not migrated yet
+
+    def test_poller_drain_commands_returns_restart(self):
+        cmd = {"id": "cX", "command": "restart_poller", "args": {}}
+        _claims = [[cmd]]   # claimable ONCE, then the queue is empty (no infinite loop)
+        c = FakeConn({
+            "engine_commands set status = 'cancelled'": [],
+            "engine_commands set status = 'running'": lambda _p: (_claims.pop(0) if _claims else []),
+        })
+        self.assertTrue(poller._drain_commands(c))
+
+    def test_poller_tick_restart_command_skips_generation(self):
+        cmd = {"id": "cR", "command": "restart_poller", "args": {}}
+        _claims = [[cmd]]
+        c = FakeConn({
+            "engine_commands set status = 'cancelled'": [],
+            "engine_commands set status = 'running'": lambda _p: (_claims.pop(0) if _claims else []),
+            "generation_requests set status = 'running'": [],
+        })
+        with mock.patch.object(poller.engine_ops, "run_and_record") as rar:
+            res = poller.tick(c)
+        self.assertIsNone(res)
+        rar.assert_not_called()          # generation drain skipped this tick
+        self.assertTrue(poller._STOP)    # poller asked to exit for systemd to relaunch
 
 
 if __name__ == "__main__":

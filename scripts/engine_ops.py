@@ -44,7 +44,20 @@ SCRIPTS = ROOT / "scripts"
 RUN_DAILY = SCRIPTS / "run_daily.py"
 LOCK_PATH = ROOT / ".run.lock"          # serialises run_daily across timer + poller
 LOG_EXCERPT_BYTES = 8 * 1024            # last ~8KB of combined stdout/stderr
-RUN_TIMEOUT = int(os.environ.get("ASSETFRAME_RUN_TIMEOUT", "5400"))   # 90 min hard cap
+
+
+def _int_env(name, default):
+    """Parse an int env var, falling back to `default` on a missing/garbage value. A bad value must
+    NEVER raise at import time: that would crash the poller before main() runs, and systemd
+    Restart=always would re-read the same bad .env and crash-LOOP it — unrecoverable on a VM with
+    no inbound ports. (set_config also validates such keys, but this is the last line of defence.)"""
+    try:
+        return int(str(os.environ.get(name, default)).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+RUN_TIMEOUT = _int_env("ASSETFRAME_RUN_TIMEOUT", 5400)   # 90 min hard cap (garbage -> default)
 CANCEL_POLL_SECONDS = 5                 # how often we check cancel_requested mid-run
 
 
@@ -628,3 +641,240 @@ def _finish_request(conn, request_id, status, run_id, error):
             (status, run_id, (error or None) if error else None, request_id))
     except Exception:
         pass
+
+
+# ============================================================ engine_commands
+# A SECOND web->box control channel (after generation_requests): the admin console enqueues an
+# allow-listed COMMAND to control the box — restart the poller, pull latest code, re-run the
+# publish chain (recovers a generate-that-failed-to-publish, e.g. boto3 missing), fetch logs, or
+# set an allow-listed config value. The poller claims + runs them on its normal Neon cadence via
+# claim_next_command + run_command, exactly like generation_requests. The allow-list is enforced
+# HERE (the box NEVER runs an unknown verb), independently of whatever the web sends — that is the
+# security boundary. Restart is a GRACEFUL SELF-EXIT, not sudo: NoNewPrivileges=true on the poller
+# unit blocks the poller from escalating, so we record the command done and let systemd
+# Restart=always relaunch the process (onto new code, if pull_latest ran first).
+
+# Keys set_config may write to ROOT/.env — ONLY keys the engine actually consumes (every settable
+# key is attack surface, so keep it minimal). Never secrets/credentials/URLs.
+_SETTABLE_CONFIG_KEYS = {
+    "ASSETFRAME_AUTHOR_BRIEFS", "ADVISOR_DATA_PROVIDER", "ASSETFRAME_RUN_TIMEOUT",
+}
+# Per-key value validators — reject a value that would brick the box via an allow-listed key. In
+# particular ASSETFRAME_RUN_TIMEOUT is int()-parsed at import; a non-integer would crash-loop the
+# poller. A key with no validator only gets the generic single-line / length check.
+_CONFIG_VALUE_VALIDATORS = {
+    "ASSETFRAME_RUN_TIMEOUT": lambda v: v.isdigit() and 60 <= int(v) <= 86400,
+}
+# tail_logs may only read these systemd units (prevents arbitrary -u injection).
+_KNOWN_POLLER_UNITS = {"assetframe-poller.service", "assetframe-poller-dev.service"}
+
+
+def claim_next_command(conn):
+    """Atomically claim the oldest queued engine_command, or None. Mirrors claim_next_request:
+    queued+cancel_requested rows are short-circuited to 'cancelled'; otherwise the oldest queued,
+    non-cancelled row is flipped to 'running' under FOR UPDATE SKIP LOCKED so two pollers never
+    claim the same row. Returns the claimed row dict, or None. Quietly returns None when the
+    engine_commands table doesn't exist yet (migration 1750000020000 not applied)."""
+    try:
+        with conn.transaction():
+            conn.execute(
+                "UPDATE engine_commands SET status = 'cancelled', finished_at = now() "
+                "WHERE id IN (SELECT id FROM engine_commands "
+                "             WHERE status = 'queued' AND cancel_requested = true "
+                "             FOR UPDATE SKIP LOCKED)")
+        with conn.transaction():
+            row = conn.execute(
+                "UPDATE engine_commands SET status = 'running', started_at = now() "
+                "WHERE id = (SELECT id FROM engine_commands "
+                "            WHERE status = 'queued' AND cancel_requested = false "
+                "            ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) "
+                "RETURNING *").fetchone()
+        return row
+    except psycopg.errors.UndefinedTable:
+        return None   # table not migrated yet — nothing to do (no log spam)
+
+
+def reap_stale_commands(conn):
+    """Called once on poller startup: mark any engine_commands left 'running' by a PREVIOUS process
+    (a restart command whose outcome-write was lost, or a crash) as 'failed', so the admin console
+    never shows a phantom 'running' command forever (claim_next_command only ever re-claims
+    'queued', so a stale 'running' row is otherwise never reconciled). Best-effort; a missing table
+    is a no-op."""
+    try:
+        conn.execute(
+            "UPDATE engine_commands SET status = 'failed', "
+            "  result = coalesce(result, 'interrupted (poller restarted)'), finished_at = now() "
+            "WHERE status = 'running'")
+    except Exception:
+        pass
+
+
+def run_command(conn, row):
+    """Execute one claimed engine_command and record the outcome on the row. Never raises.
+
+    Returns {status, result, restart}: status in done|failed; restart=True asks the poller to
+    self-exit so systemd relaunches it (restart_poller + a successful pull_latest). The command
+    name is dispatched through the allow-list — an unknown verb is recorded 'failed', never run."""
+    cmd_id = row.get("id")
+    command = (row.get("command") or "").strip()
+    args = row.get("args") or {}
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except Exception:
+            args = {}
+    if not isinstance(args, dict):
+        args = {}
+    handler = _COMMAND_HANDLERS.get(command)
+    if handler is None:
+        return _finish_command(conn, cmd_id, "failed", f"unknown command '{command}'", None, False)
+    try:
+        ok, result, log, restart = handler(conn, args)
+        return _finish_command(conn, cmd_id, "done" if ok else "failed", result, log, bool(restart) and bool(ok))
+    except Exception as ex:
+        return _finish_command(conn, cmd_id, "failed", f"command error: {ex}"[:400], None, False)
+
+
+def _finish_command(conn, cmd_id, status, result, log, restart):
+    """Write the command outcome (status/result/log_excerpt/finished_at). Done BEFORE any restart
+    self-exit, so a relaunch never finds the command stuck 'running'. Returns the dispatch result."""
+    try:
+        conn.execute(
+            "UPDATE engine_commands SET status = %s, result = %s, log_excerpt = %s, "
+            "  finished_at = now() WHERE id = %s",
+            (status, (result or None), (_tail(log, 4096) if log else None), cmd_id))
+    except Exception:
+        pass
+    return {"status": status, "result": result, "restart": bool(restart)}
+
+
+# ---- handlers: each returns (ok: bool, result: str, log: str|None, restart: bool) -------------
+def _cmd_restart_poller(conn, args):
+    """Bounce the poller. We do NOT sudo (NoNewPrivileges blocks it); we record done and ask the
+    poller to self-exit — systemd Restart=always (RestartSec=5) relaunches it within seconds."""
+    return True, "restart requested — poller self-exits; systemd relaunches it", None, True
+
+
+def _cmd_pull_latest(conn, args):
+    """git fetch + git pull --ff-only + reinstall deps, then restart onto the new code. Mirrors the
+    CI deploy minus the sudo systemctl (replaced by the self-exit). --ff-only is non-destructive —
+    it refuses rather than rewrites if the tree diverged. Held under the run lock so it never pulls
+    mid-generation."""
+    steps = [
+        ["git", "fetch", "--prune", "origin"],
+        ["git", "pull", "--ff-only"],
+        [sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "--quiet"],
+        ["npm", "install", "--omit=dev", "--no-audit", "--no-fund"],
+    ]
+    logs = []
+    try:
+        with _FileLock(LOCK_PATH, blocking=False):
+            for cmd in steps:
+                try:
+                    p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=600)
+                except Exception as ex:
+                    return False, f"{cmd[0]} failed to launch: {ex}"[:300], "\n".join(logs), False
+                out = ((p.stdout or "") + (p.stderr or "")).strip()
+                logs.append(f"$ {' '.join(cmd)} (rc={p.returncode})\n{_tail(out, 1500)}")
+                if p.returncode != 0:
+                    return False, f"{cmd[0]} exited {p.returncode}", "\n".join(logs), False
+    except _FileLock.Locked:
+        return False, "another run is in progress — retry pull_latest shortly", None, False
+    return True, "pulled latest + reinstalled deps — restarting onto new code", "\n".join(logs), True
+
+
+def _cmd_run_maintenance(conn, args):
+    """Re-run the publish chain (export -> publish -> sync) WITHOUT generating. Recovers a run
+    whose generation succeeded but publish/sync failed (e.g. boto3 missing, a transient R2/Neon
+    blip) — the reports are already on disk; this just pushes them to R2 + Neon. Held under the
+    run lock so it never collides with a generation or the daily timer."""
+    try:
+        with _FileLock(LOCK_PATH, blocking=False):
+            ok, err, log = _publish_chain(conn, None)
+    except _FileLock.Locked:
+        return False, "another run is in progress — retry run_maintenance shortly", None, False
+    if ok:
+        return True, "publish chain re-ran (export -> publish -> sync)", log, False
+    return False, f"publish chain failed: {err}", log, False
+
+
+def _cmd_tail_logs(conn, args):
+    """Capture recent poller logs for the admin console. Best-effort journalctl for the poller
+    unit (only the two known unit names are allowed); falls back to the most recent engine_runs
+    log excerpts from Neon if journald isn't readable as this user."""
+    try:
+        lines = max(20, min(1000, int(args.get("lines"))))
+    except (TypeError, ValueError):
+        lines = 200
+    unit = args.get("unit")
+    if unit not in _KNOWN_POLLER_UNITS:
+        unit = "assetframe-poller-dev.service" if "-dev" in str(ROOT) else "assetframe-poller.service"
+    out = ""
+    try:
+        p = subprocess.run(["journalctl", "-u", unit, "-n", str(lines), "--no-pager"],
+                           capture_output=True, text=True, timeout=30)
+        if p.returncode == 0 and (p.stdout or "").strip():
+            out = p.stdout
+    except Exception:
+        out = ""
+    if not out.strip():
+        try:
+            rows = conn.execute(
+                "SELECT id, status, started_at, errors, log_excerpt FROM engine_runs "
+                "ORDER BY started_at DESC LIMIT 5").fetchall()
+            parts = [f"=== run {r.get('id')} [{r.get('status')}] {r.get('started_at')} ===\n"
+                     f"{(r.get('errors') or '')}\n{(r.get('log_excerpt') or '')}" for r in (rows or [])]
+            out = "\n\n".join(parts) or "(no logs: journalctl unreadable and no engine_runs rows)"
+        except Exception as ex:
+            out = f"(could not read logs: {ex})"
+    return True, f"captured {unit} logs ({lines} lines requested)", out, False
+
+
+def _cmd_set_config(conn, args):
+    """Set ONE allow-listed config key in ROOT/.env. Takes effect on the next restart (systemd
+    reads EnvironmentFile at start). Tight allow-list; never writes secrets/credentials/URLs."""
+    key = (args.get("key") or "").strip()
+    if key not in _SETTABLE_CONFIG_KEYS:
+        return False, f"key '{key}' is not settable (allowed: {sorted(_SETTABLE_CONFIG_KEYS)})", None, False
+    value = "" if args.get("value") is None else str(args.get("value"))
+    if "\n" in value or "\r" in value or len(value) > 200:
+        return False, "value must be a single line of <= 200 chars", None, False
+    validator = _CONFIG_VALUE_VALIDATORS.get(key)
+    if validator and not validator(value):
+        return False, f"value {value!r} is not valid for {key}", None, False
+    envp = ROOT / ".env"
+    try:
+        lines = envp.read_text(encoding="utf-8").splitlines() if envp.exists() else []
+    except Exception as ex:
+        return False, f"could not read .env: {ex}"[:200], None, False
+    found = False
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s and not s.startswith("#") and "=" in s and s.split("=", 1)[0].strip() == key:
+            lines[i] = f"{key}={value}"
+            found = True
+            break
+    if not found:
+        lines.append(f"{key}={value}")
+    try:
+        # Atomic write (tmp + os.replace): .env holds DATABASE_URL + the R2/Anthropic secrets, so a
+        # crash mid-write must NEVER truncate it (that would brick the poller — ConfigError loop —
+        # with no inbound recovery path). os.replace is atomic within the same directory.
+        tmp = ROOT / ".env.tmp"
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.replace(tmp, envp)
+    except Exception as ex:
+        return False, f"could not write .env: {ex}"[:200], None, False
+    return True, f"set {key} (restart the poller for it to take effect)", None, False
+
+
+_COMMAND_HANDLERS = {
+    "restart_poller": _cmd_restart_poller,
+    "pull_latest": _cmd_pull_latest,
+    "run_maintenance": _cmd_run_maintenance,
+    "tail_logs": _cmd_tail_logs,
+    "set_config": _cmd_set_config,
+}
+
+# Canonical allow-list (the web keeps its own copy for defence in depth; this is the boundary).
+ALLOWED_COMMANDS = tuple(_COMMAND_HANDLERS.keys())
