@@ -291,15 +291,6 @@ def _add_trading_days(d, n, holiday_dates):
     return d
 
 
-def _coming_friday_close(start):
-    """Friday 21:00 UTC in start's week, or the next Friday if start is already at/after it."""
-    fri = (start + timedelta(days=(4 - start.weekday()) % 7)).replace(
-        hour=21, minute=0, second=0, microsecond=0)
-    if fri <= start:
-        fri += timedelta(days=7)
-    return fri
-
-
 def get_window(profile_key, now=None, forecast_window=None, holiday_dates=None,
                min_remaining_min=90, friday_cutoff_min=240):
     """Resolve the prediction window for a given forecast horizon. Standard windows delegate
@@ -317,16 +308,18 @@ def get_window(profile_key, now=None, forecast_window=None, holiday_dates=None,
     if ptype == "crypto_24_7":
         end = start + timedelta(days=7 if fw == "next_week" else 5)
     elif ptype == "equity_rth":
-        # a trading week = 5 regular sessions; end at the 5th session's RTH close
+        # a trading week = 5 regular sessions; end at the 5th session's RTH close (DST-correct)
         close_date = _add_trading_days(start.date(), 4, holiday_dates)
-        end = datetime(close_date.year, close_date.month, close_date.day,
-                       end.hour, end.minute, tzinfo=UTC)
-    else:  # 24h-ish futures / FX, daily close 21:00 UTC
+        end = _equity_rth(profile_key, close_date)[1]
+    else:  # 24h-ish futures / FX -> the venue's daily close (DST-correct via _local_close_on)
         if fw == "next_week":
-            end = _coming_friday_close(start)
+            fri = start.date() + timedelta(days=(4 - start.weekday()) % 7)
+            end = _local_close_on(profile_key, fri, "weekly_close")
+            if end <= start:
+                end = _local_close_on(profile_key, fri + timedelta(days=7), "weekly_close")
         else:
             close_date = _add_trading_days(start.date(), 4, holiday_dates)
-            end = datetime(close_date.year, close_date.month, close_date.day, 21, 0, tzinfo=UTC)
+            end = _local_close_on(profile_key, close_date, "weekly_close")
     if end <= start:                      # never emit a degenerate window
         end = start + timedelta(days=1)
     out = dict(base)
