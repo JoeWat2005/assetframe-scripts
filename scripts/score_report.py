@@ -77,10 +77,15 @@ def load_bars(path, start, end):
     with open(path, newline="", encoding="utf-8-sig") as f:
         for r in csv.reader(f):
             if len(r) >= 5 and r[0][:2].isdigit():
-                t = parse_dt(r[0][:16])
+                # A single corrupt/edited row (bad date or non-numeric OHLC) must skip, never
+                # crash the whole scoring run — scoring decides money-adjacent outcomes.
+                try:
+                    t = parse_dt(r[0][:16])
+                    o, h, l, c = float(r[1]), float(r[2]), float(r[3]), float(r[4])
+                except (ValueError, IndexError):
+                    continue
                 if start <= t <= end:
-                    bars.append({"t": t, "o": float(r[1]), "h": float(r[2]),
-                                 "l": float(r[3]), "c": float(r[4])})
+                    bars.append({"t": t, "o": o, "h": h, "l": l, "c": c})
     return bars
 
 

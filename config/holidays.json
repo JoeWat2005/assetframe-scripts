@@ -1,5 +1,15 @@
 {
-  "_comment": "Market holiday table for scripts/calendar_rules.py. Keys are calendar groups: US (NYSE/Nasdaq/CME) and UK (LSE); dates are YYYY-MM-DD in the venue's local calendar. INCOMPLETE — seeded only with verified fixed-date + well-known 2026 closures. Add the remaining floating holidays (US: MLK, Presidents, Good Friday, Memorial, Labor; UK: spring/summer bank holidays) before relying on holiday skips, or upgrade calendar_rules.py to the `exchange_calendars` library. The weekend rule + intraday freshness + the approval gate are the backstops until then.",
-  "US": ["2026-01-01", "2026-06-19", "2026-07-03", "2026-11-26", "2026-12-25"],
-  "UK": ["2026-01-01", "2026-12-25", "2026-12-28"]
+  "_comment": "Market holiday table for scripts/calendar_rules.py. Keys are calendar groups: US (NYSE/Nasdaq/CME) and UK (LSE); dates are YYYY-MM-DD full-day market CLOSURES in the venue's local calendar (observed dates, i.e. weekend holidays roll to the substitute weekday). Covers 2026 + 2027 including floating holidays (MLK, Presidents, Good Friday, Memorial, Labor, Thanksgiving; UK Easter Monday + bank holidays). Half-days (e.g. US day-after-Thanksgiving, Christmas Eve early close; UK Dec 24/31) are NOT listed — those sessions still open. Re-verify against the official NYSE/LSE calendars before each new year and append the next year. calendar_rules.holiday_coverage() warns if the run year is uncovered.",
+  "US": [
+    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+    "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
+    "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24"
+  ],
+  "UK": [
+    "2026-01-01", "2026-04-03", "2026-04-06", "2026-05-04", "2026-05-25",
+    "2026-08-31", "2026-12-25", "2026-12-28",
+    "2027-01-01", "2027-03-26", "2027-03-29", "2027-05-03", "2027-05-31",
+    "2027-08-30", "2027-12-27", "2027-12-28"
+  ]
 }

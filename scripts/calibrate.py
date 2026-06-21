@@ -74,7 +74,9 @@ def _merge_duplicate_x(points):
     for x, y, w in points:
         sw, swy = agg.get(x, (0.0, 0.0))
         agg[x] = (sw + w, swy + y * w)
-    merged = [(x, swy / sw, sw) for x, (sw, swy) in agg.items()]
+    # sw is a sum of positive sample counts (load_points enforces n>0), but guard divide-by-zero
+    # defensively so a future caller passing a zero-weight point can't crash the fit.
+    merged = [(x, (swy / sw if sw else 0.5), sw) for x, (sw, swy) in agg.items()]
     merged.sort(key=lambda p: p[0])
     return merged
 

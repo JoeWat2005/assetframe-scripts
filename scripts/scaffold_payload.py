@@ -40,7 +40,7 @@ from pathlib import Path
 
 import taxonomy
 import confidence as conf_engine
-from sessions import get_session
+from sessions import get_session, get_window
 
 try:
     from zoneinfo import ZoneInfo
@@ -320,6 +320,23 @@ def assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
     rid_stamp = (as_of_dt.strftime("%Y%m%d%H%M") if as_of_dt is not None
                  else report_date.replace("-", ""))
     win_s, win_e = session["window_start_utc"], session["window_end_utc"]
+    # Window-freshness guard (defends the late-run window-switch case): if the analysis was
+    # fetched well before this payload is assembled (execution backlog between the intraday
+    # fetch and scaffold), the levels may be stale for the chosen window. Surface a warning the
+    # QA/render can act on. Skipped for backdated runs (as_of trims data to the past moment).
+    window_freshness_warning = None
+    if as_of_dt is None:
+        fetched = analysis.get("fetched_utc") or (analysis.get("freshness") or {}).get("last_bar_utc")
+        if fetched:
+            try:
+                ft = datetime.strptime(str(fetched)[:16], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+                age_h = (datetime.now(timezone.utc) - ft).total_seconds() / 3600
+                if age_h > 6:
+                    window_freshness_warning = (f"analysis fetched {age_h:.1f}h before this window "
+                                                f"was built - possible execution backlog / stale levels")
+                    print(f"WARNING: {window_freshness_warning}", file=sys.stderr)
+            except (ValueError, TypeError):
+                pass
     dq = conf_engine.compute_dq(analysis, brief.get("claims"),
                                 brief.get("options_context_included", False))
 
@@ -354,6 +371,7 @@ def assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
         "latest_bar_timestamp_report_tz": to_display(last_ts),
         "latest_bar_complete": True,
         "data_provider": (analysis.get("provider") or {}).get("hourly", "yahoo"),
+        "window_freshness_warning": window_freshness_warning,
         "cross_check_provider": brief.get("cross_check", "single-source (no independent cross-check this run)"),
         "price_type": brief.get("price_type", "session close"),
         "contract_month": brief.get("contract_month", "n/a"),
@@ -595,12 +613,13 @@ def _source_audit_html(brief, analysis, dq):
 
 def parse_args(argv):
     o = {"analysis": None, "brief": None, "research": None, "social": None,
-         "ledger_context": None, "calib": None, "session_profile": None,
+         "ledger_context": None, "calib": None, "session_profile": None, "forecast_window": None,
          "out": None, "predictions": None, "as_of": None, "window_end": None, "check": False}
     i = 0
     keys = {"--analysis": "analysis", "--brief": "brief", "--research": "research",
             "--social": "social", "--ledger-context": "ledger_context", "--calib": "calib",
-            "--session-profile": "session_profile", "--out": "out", "--predictions": "predictions",
+            "--session-profile": "session_profile", "--forecast-window": "forecast_window",
+            "--out": "out", "--predictions": "predictions",
             "--as-of": "as_of", "--window-end": "window_end"}
     while i < len(argv):
         a = argv[i]
@@ -651,7 +670,10 @@ def main():
                 .replace(tzinfo=timezone.utc)
         except ValueError:
             die(f"--as-of must be 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' UTC (got {o['as_of']!r})")
-    session = get_session(profile, now=now_dt)
+    # get_window is horizon-aware: for the standard next-session forecast windows it returns
+    # the exact get_session() result (the live universe is unchanged); for 'next_week' /
+    # 'next_5_sessions' it extends the window end to a multi-session horizon.
+    session = get_window(profile, now=now_dt, forecast_window=o["forecast_window"])
     if now_dt is not None:
         session["window_start_utc"] = now_dt.strftime("%Y-%m-%d %H:%M")
     if o["window_end"]:

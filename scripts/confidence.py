@@ -356,14 +356,39 @@ def _in_window_event(brief):
 
 # --- calibration map --------------------------------------------------------
 
+def _is_valid_calib_map(calib):
+    """A calibration map is trusted only if its knots are strictly ascending in x, non-decreasing
+    in y, and within [0,100]. A corrupt or hand-edited map fails this and the caller falls back
+    to identity rather than emitting a non-monotone / out-of-range confidence (the map is a
+    derived, machine-written product; this is defence against it being tampered with)."""
+    if not isinstance(calib, dict):
+        return False
+    knots = calib.get("knots")
+    if not isinstance(knots, list) or len(knots) < 2:
+        return False
+    px = py = None
+    for k in knots:
+        if not (isinstance(k, (list, tuple)) and len(k) == 2):
+            return False
+        x, y = k
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (x, y)):
+            return False
+        if not (0 <= x <= 100 and 0 <= y <= 100):
+            return False
+        if px is not None and x <= px:          # strictly ascending x (safe interpolation)
+            return False
+        if py is not None and y < py - 1e-9:     # non-decreasing y (isotonic)
+            return False
+        px, py = x, y
+    return True
+
+
 def _apply_calibration(score, calib):
     """Piecewise-linear interpolation through the isotonic knots written by
-    calibrate.py. No map (or <2 knots) -> identity."""
-    if not calib:
+    calibrate.py. No / invalid map -> identity (fail safe)."""
+    if not _is_valid_calib_map(calib):
         return score
     knots = calib.get("knots") or []
-    if len(knots) < 2:
-        return score
     xs = [k[0] for k in knots]
     ys = [k[1] for k in knots]
     if score <= xs[0]:

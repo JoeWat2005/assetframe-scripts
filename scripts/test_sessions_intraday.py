@@ -32,6 +32,42 @@ class TestCrypto247(unittest.TestCase):
         self.assertEqual(s["next_maintenance_break"], "none scheduled (venue-dependent)")
 
 
+class TestGetWindow(unittest.TestCase):
+    PROFILES = ("cme_futures", "fx_spot", "us_equity_rth", "crypto_24_7")
+    MOMENTS = (datetime(2026, 6, 15, 5, 0, tzinfo=timezone.utc),
+               datetime(2026, 6, 17, 14, 0, tzinfo=timezone.utc),
+               datetime(2026, 6, 13, 10, 0, tzinfo=timezone.utc))
+
+    def test_standard_windows_identical_to_get_session(self):
+        # SAFETY: the live universe must be byte-identical. get_window with any standard /
+        # empty / unknown forecast window returns exactly get_session().
+        for p in self.PROFILES:
+            for m in self.MOMENTS:
+                base = SS.get_session(p, now=m)
+                for fw in (None, "next_session", "next_regular_session",
+                           "next_liquid_session", "rolling_24h", "garbage"):
+                    self.assertEqual(SS.get_window(p, now=m, forecast_window=fw), base,
+                                     f"{p} {fw} {m} diverged from get_session")
+
+    def test_long_windows_extend_end_keep_start(self):
+        m = datetime(2026, 6, 17, 14, 0, tzinfo=timezone.utc)  # Wednesday, mid-week
+        for p in self.PROFILES:
+            base = SS.get_session(p, now=m)
+            for fw in ("next_week", "next_5_sessions"):
+                w = SS.get_window(p, now=m, forecast_window=fw)
+                self.assertEqual(w["window_start_utc"], base["window_start_utc"])
+                self.assertGreaterEqual(w["window_end_utc"], base["window_end_utc"])
+                self.assertEqual(w["forecast_window"], fw)
+                # window must be non-degenerate
+                self.assertGreater(w["window_end_utc"], w["window_start_utc"])
+
+    def test_crypto_next_week_is_seven_days(self):
+        m = datetime(2026, 6, 15, 5, 0, tzinfo=timezone.utc)
+        w = SS.get_window("crypto_24_7", now=m, forecast_window="next_week")
+        self.assertEqual(w["window_start_utc"], "2026-06-15 05:00")
+        self.assertEqual(w["window_end_utc"], "2026-06-22 05:00")
+
+
 class TestEquitySessions(unittest.TestCase):
     def test_weekend_targets_next_session(self):
         sat = datetime(2026, 6, 13, 10, 0, tzinfo=timezone.utc)

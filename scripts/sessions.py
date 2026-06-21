@@ -204,7 +204,73 @@ def get_session(profile_key, now=None, min_remaining_min=90, friday_cutoff_min=2
     return out
 
 
+# --- longer-horizon windows -------------------------------------------------
+# get_window() is the horizon-aware front door to get_session(). For the standard next-session
+# forecast windows it returns get_session() UNCHANGED (so the live universe is byte-identical);
+# for the longer horizons it only EXTENDS window_end_utc to span multiple sessions. Scoring
+# (score_report.py) is generic on the window bounds, so a longer window scores with no other
+# change. start / market_state / prose are left as the base session's.
+LONG_WINDOWS = ("next_week", "next_5_sessions")
+
+
+def _add_trading_days(d, n, holiday_dates):
+    """Date n trading days after date d (skipping weekends + holidays). n >= 1."""
+    count = 0
+    while count < n:
+        d = d + timedelta(days=1)
+        if d.weekday() >= 5 or d in holiday_dates:
+            continue
+        count += 1
+    return d
+
+
+def _coming_friday_close(start):
+    """Friday 21:00 UTC in start's week, or the next Friday if start is already at/after it."""
+    fri = (start + timedelta(days=(4 - start.weekday()) % 7)).replace(
+        hour=21, minute=0, second=0, microsecond=0)
+    if fri <= start:
+        fri += timedelta(days=7)
+    return fri
+
+
+def get_window(profile_key, now=None, forecast_window=None, holiday_dates=None,
+               min_remaining_min=90, friday_cutoff_min=240):
+    """Resolve the prediction window for a given forecast horizon. Standard windows delegate
+    unchanged to get_session(); 'next_week' / 'next_5_sessions' extend the END to a multi-session
+    horizon. Unknown / empty forecast_window -> the base next-session window."""
+    base = get_session(profile_key, now=now, min_remaining_min=min_remaining_min,
+                       friday_cutoff_min=friday_cutoff_min, holiday_dates=holiday_dates)
+    fw = (forecast_window or "").strip().lower()
+    if fw not in LONG_WINDOWS:
+        return base
+    holiday_dates = holiday_dates or set()
+    start = datetime.strptime(base["window_start_utc"], "%Y-%m-%d %H:%M").replace(tzinfo=UTC)
+    end = datetime.strptime(base["window_end_utc"], "%Y-%m-%d %H:%M").replace(tzinfo=UTC)
+    ptype = PROFILES[profile_key]["type"]
+    if ptype == "crypto_24_7":
+        end = start + timedelta(days=7 if fw == "next_week" else 5)
+    elif ptype == "equity_rth":
+        # a trading week = 5 regular sessions; end at the 5th session's RTH close
+        close_date = _add_trading_days(start.date(), 4, holiday_dates)
+        end = datetime(close_date.year, close_date.month, close_date.day,
+                       end.hour, end.minute, tzinfo=UTC)
+    else:  # 24h-ish futures / FX, daily close 21:00 UTC
+        if fw == "next_week":
+            end = _coming_friday_close(start)
+        else:
+            close_date = _add_trading_days(start.date(), 4, holiday_dates)
+            end = datetime(close_date.year, close_date.month, close_date.day, 21, 0, tzinfo=UTC)
+    if end <= start:                      # never emit a degenerate window
+        end = start + timedelta(days=1)
+    out = dict(base)
+    out["window_end_utc"] = _fmt(end)
+    out["window_label"] = f"{fw.replace('_', ' ')} horizon (multi-session)"
+    out["forecast_window"] = fw
+    return out
+
+
 if __name__ == "__main__":
     import json, sys
     key = sys.argv[1] if len(sys.argv) > 1 else "cme_futures"
-    print(json.dumps(get_session(key), indent=1))
+    fw = sys.argv[2] if len(sys.argv) > 2 else None
+    print(json.dumps(get_window(key, forecast_window=fw), indent=1))

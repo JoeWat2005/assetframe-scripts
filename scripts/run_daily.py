@@ -198,7 +198,8 @@ def score_step(now, tickers=None):
     # refresh ledger-derived memory (cheap; best-effort)
     refresh = {}
     for label, cmd in (("calibrate", ["scripts/calibrate.py"]),
-                       ("research_memory", ["scripts/research_memory.py"])):
+                       ("research_memory", ["scripts/research_memory.py"]),
+                       ("ledger_db", ["scripts/ledger_db.py", "rebuild"])):
         ok, _o, err = _run(cmd, timeout=60)
         refresh[label] = "ok" if ok else f"failed: {(err or '')[-120:]}"
     return {"scored": scored, "skipped": skipped, "errors": errors, "memory_refresh": refresh}
@@ -472,6 +473,8 @@ def generate_asset(asset, now, no_render, as_of=None):
 
     # 4. scaffold (payload + predictions + deterministic confidence)
     scmd = ["scripts/scaffold_payload.py", tk, "--session-profile", asset["session_profile"]]
+    if asset.get("forecast_window"):
+        scmd += ["--forecast-window", asset["forecast_window"]]  # standard windows are a no-op
     if backdated:
         scmd += ["--as-of", now_arg]   # past-date the prediction window so it can be scored
     ok, _ = stage("scaffold", scmd)

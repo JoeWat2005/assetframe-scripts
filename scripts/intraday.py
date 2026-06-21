@@ -100,20 +100,52 @@ def _http_json(url, retries=2, backoff=1.0):
     raise last
 
 
+_YAHOO_HOSTS = ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
+
+
 def yahoo_chart(symbol, interval, rng):
-    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}"
-           f"?interval={interval}&range={rng}")
-    data = _http_json(url)
-    res = data["chart"]["result"][0]
-    q = res["indicators"]["quote"][0]
-    rows = []
-    for i, ts in enumerate(res.get("timestamp", [])):
-        o, h, l, c = q["open"][i], q["high"][i], q["low"][i], q["close"][i]
-        if None in (o, h, l, c):
+    """Yahoo chart fetch with HOST failover (query1 -> query2). A single Yahoo host being
+    rate-limited / briefly down is the most common feed failure; trying the mirror host first
+    rescues it before the chain falls through to another provider. The response shape is
+    validated BEFORE indexing so a malformed / error payload raises a clear ValueError (which
+    the fetch chain handles) instead of a cryptic KeyError/IndexError. Once a host returns a
+    well-formed result the rows are returned as-is (an empty-but-valid result is left for the
+    caller's degrade path, exactly as before)."""
+    last = None
+    for host in _YAHOO_HOSTS:
+        url = (f"https://{host}/v8/finance/chart/{urllib.parse.quote(symbol)}"
+               f"?interval={interval}&range={rng}")
+        try:
+            data = _http_json(url)
+        except Exception as ex:
+            last = ex
             continue
-        v = q.get("volume", [None] * (i + 1))[i] or 0
-        rows.append({"ts": ts, "o": o, "h": h, "l": l, "c": c, "v": v})
-    return res["meta"], rows
+        chart = (data or {}).get("chart") or {}
+        if chart.get("error"):
+            last = ValueError(f"yahoo error for {symbol}: {str(chart['error'])[:100]}")
+            continue
+        results = chart.get("result") or []
+        if not results:
+            last = ValueError(f"yahoo returned no result for {symbol} ({interval}/{rng})")
+            continue
+        res = results[0]
+        quotes = (res.get("indicators") or {}).get("quote") or []
+        if not quotes:
+            last = ValueError(f"yahoo response missing quote indicators for {symbol}")
+            continue
+        q = quotes[0]
+        rows = []
+        for i, ts in enumerate(res.get("timestamp", [])):
+            try:
+                o, h, l, c = q["open"][i], q["high"][i], q["low"][i], q["close"][i]
+            except (KeyError, IndexError, TypeError):
+                continue
+            if None in (o, h, l, c):
+                continue
+            v = (q.get("volume") or [None] * (i + 1))[i] or 0
+            rows.append({"ts": ts, "o": o, "h": h, "l": l, "c": c, "v": v})
+        return res.get("meta") or {}, rows
+    raise last or ValueError(f"yahoo: no data for {symbol} ({interval}/{rng})")
 
 
 # --- EODHD adapter (symbols: {CODE}.{EXCHANGE}; only .L->.LSE verified from docs,
@@ -207,10 +239,61 @@ def eodhd_chart(symbol, interval, rng, api_key):
     return meta, rows
 
 
+# --- CoinGecko adapter (keyless DAILY crypto fallback) ----------------------------
+# CoinGecko serves free, keyless crypto OHLC. Crypto assets run 24/7/365 (every single day),
+# so keeping them alive through a Yahoo outage matters most. Used ONLY as a last-resort
+# fallback for the essential DAILY series of a crypto symbol. The public /ohlc endpoint auto-
+# picks intraday granularity for short windows, so we resample whatever it returns into DAILY
+# OHLC by UTC date (o=first, h=max, l=min, c=last). History is shorter than Yahoo's, so the
+# warm-up guard / cold-indicator cap apply downstream — a safe degraded read, never wrong data.
+_COINGECKO_IDS = {"BTC-USD": "bitcoin", "ETH-USD": "ethereum", "BTC": "bitcoin", "ETH": "ethereum",
+                  "SOL-USD": "solana", "XRP-USD": "ripple", "ADA-USD": "cardano",
+                  "DOGE-USD": "dogecoin", "BNB-USD": "binancecoin", "LTC-USD": "litecoin"}
+
+
+def map_symbol_coingecko(sym):
+    """Yahoo crypto symbol -> CoinGecko coin id, or None when it isn't a mapped crypto pair."""
+    return _COINGECKO_IDS.get(sym)
+
+
+def coingecko_chart(symbol, rng):
+    """Keyless CoinGecko OHLC resampled to DAILY -> (meta, rows ascending UTC). Crypto only."""
+    cid = map_symbol_coingecko(symbol)
+    if cid is None:
+        raise ValueError(f"coingecko: no id mapping for {symbol}")
+    url = f"https://api.coingecko.com/api/v3/coins/{cid}/ohlc?vs_currency=usd&days=30"
+    raw = _http_json(url)
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"unexpected coingecko response for {cid}: {str(raw)[:80]}")
+    days = {}
+    for c in raw:
+        if not isinstance(c, (list, tuple)) or len(c) < 5:
+            continue
+        ms, o, h, l, cl = c[0], c[1], c[2], c[3], c[4]
+        d = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).date()
+        ts = int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp())
+        if d not in days:
+            days[d] = {"ts": ts, "o": o, "h": h, "l": l, "c": cl}
+        else:
+            x = days[d]
+            x["h"], x["l"], x["c"] = max(x["h"], h), min(x["l"], l), cl
+    rows = [{"ts": v["ts"], "o": v["o"], "h": v["h"], "l": v["l"], "c": v["c"], "v": 0}
+            for _, v in sorted(days.items())]
+    meta = {"exchangeTimezoneName": "UTC", "regularMarketPrice": rows[-1]["c"] if rows else None,
+            "instrumentType": "CRYPTOCURRENCY", "currentTradingPeriod": None}
+    return meta, rows
+
+
 def fetch_chart(symbol, interval, rng, provider=None, api_key=None):
     """Provider-agnostic OHLCV fetch -> (meta, rows ascending UTC).
     meta keys: exchangeTimezoneName, regularMarketPrice, instrumentType,
-    currentTradingPeriod (None if the provider lacks it), provider, provider_note."""
+    currentTradingPeriod (None if the provider lacks it), provider, provider_note.
+
+    Provider chain: configured provider (eodhd) -> Yahoo (query1->query2 host failover) ->
+    CoinGecko (crypto only). The CoinGecko leg is keyless, DAILY-only, and reached ONLY when
+    the essential daily series fails everywhere else, so a single-vendor outage no longer aborts
+    the whole asset. Hourly keeps its prior behaviour (a failed/empty hourly degrades to
+    daily-only analysis downstream)."""
     provider = provider or PROVIDER_DEFAULT
     api_key = api_key or os.environ.get("EODHD_API_KEY")
     note = None
@@ -229,10 +312,29 @@ def fetch_chart(symbol, interval, rng, provider=None, api_key=None):
                 note = "eodhd returned 0 rows; served by yahoo"
             except Exception as ex:
                 note = f"eodhd failed ({str(ex)[:60]}); served by yahoo"
-    meta, rows = yahoo_chart(symbol, interval, rng)
-    meta = dict(meta)
-    meta["provider"], meta["provider_note"] = "yahoo", note
-    return meta, rows
+    try:
+        meta, rows = yahoo_chart(symbol, interval, rng)
+        if rows or interval != "1d":
+            meta = dict(meta)
+            meta["provider"], meta["provider_note"] = "yahoo", note
+            return meta, rows                          # success, or an empty hourly (caller degrades)
+        ynote = "yahoo returned 0 daily rows"
+    except Exception as ex:
+        if interval != "1d":
+            raise                                      # hourly: preserve the existing degrade path
+        ynote = f"yahoo failed ({str(ex)[:70]})"
+    # Daily series is essential — for crypto, try the keyless CoinGecko fallback before giving up.
+    if map_symbol_coingecko(symbol) is not None:
+        try:
+            meta, rows = coingecko_chart(symbol, rng)
+            if rows:
+                meta["provider"] = "coingecko"
+                meta["provider_note"] = "; ".join(x for x in (note, ynote, "served by coingecko") if x)
+                return meta, rows
+            ynote = f"{ynote}; coingecko returned 0 rows"
+        except Exception as ex:
+            ynote = f"{ynote}; coingecko failed ({str(ex)[:60]})"
+    raise RuntimeError(f"no daily data for {symbol}: {'; '.join(x for x in (note, ynote) if x)}")
 
 
 def freshness_block(meta, rows, now=None, granularity="hourly"):

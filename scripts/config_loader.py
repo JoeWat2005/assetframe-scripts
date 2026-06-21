@@ -16,6 +16,7 @@ Schema (per asset):
   asset_class       taxonomy.ASSET_CLASS_KEYS               (required)
   session_profile   sessions.PROFILES key                   (required)
   cadence           CADENCES                                (required)
+  cadence_day       int 0-6 (Mon=0) or weekday name         (optional; only 'weekly')
   timezone          IANA tz (zoneinfo-resolvable)           (required)
   roll_utc          int 0..23 (intraday --roll-utc)         (default 0)
   related           str comma list for intraday --related   (default "")
@@ -57,10 +58,12 @@ KNOWN_TZ = {"UTC", "Europe/London", "Europe/Zurich", "Europe/Frankfurt", "Europe
             "America/New_York", "America/Chicago", "America/Los_Angeles", "America/Toronto",
             "Asia/Tokyo", "Asia/Shanghai", "Asia/Hong_Kong", "Asia/Singapore", "Australia/Sydney"}
 # Scheduling vocabulary (distinct from taxonomy's prediction vocabulary).
-CADENCES = ("daily", "weekday", "trading_day", "weekday_or_market_open")
+CADENCES = ("daily", "weekday", "trading_day", "weekday_or_market_open", "weekly", "monthly")
+_WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 PUBLISH_POLICIES = ("approval_required", "auto")
 REPORT_TIERS = ("official", "watchlist", "staged", "backtest")
-FORECAST_WINDOWS = ("next_liquid_session", "next_regular_session", "rolling_24h", "next_session")
+FORECAST_WINDOWS = ("next_liquid_session", "next_regular_session", "rolling_24h", "next_session",
+                    "next_week", "next_5_sessions")
 REQUIRED = ("id", "name", "instrument", "ticker", "provider_symbols", "asset_class",
             "session_profile", "cadence", "timezone")
 
@@ -91,6 +94,14 @@ def _validate_one(a, idx, seen_ids):
         errs.append(f"{where}: session_profile '{a['session_profile']}' not in {list(SESSION_KEYS)}")
     if a.get("cadence") and a["cadence"] not in CADENCES:
         errs.append(f"{where}: cadence '{a['cadence']}' not in {list(CADENCES)}")
+    cd = a.get("cadence_day")
+    if cd is not None and not isinstance(cd, bool):
+        ok_cd = (isinstance(cd, int) and 0 <= cd <= 6) or \
+                (isinstance(cd, str) and cd.strip().lower()[:3] in _WEEKDAY_NAMES)
+        if not ok_cd:
+            errs.append(f"{where}: cadence_day '{cd}' must be int 0-6 (Mon=0) or a weekday name")
+    elif isinstance(cd, bool):
+        errs.append(f"{where}: cadence_day must be int 0-6 or a weekday name, not a bool")
     pp = a.get("publish_policy", "approval_required")
     if pp not in PUBLISH_POLICIES:
         errs.append(f"{where}: publish_policy '{pp}' not in {list(PUBLISH_POLICIES)}")

@@ -8,10 +8,11 @@ content/
 runs/
 ledger/sim/
 
-# Derived ledger products — rebuilt by calibrate.py / research_memory.py.
+# Derived ledger products — rebuilt by calibrate.py / research_memory.py / ledger_db.py.
 # The source-of-truth ledger/outcome_ledger.csv stays tracked.
 ledger/calibration_map.json
 ledger/research_memory.json
+ledger/outcome_ledger.sqlite
 
 # Secrets — never commit (the template IS committed)
 .env

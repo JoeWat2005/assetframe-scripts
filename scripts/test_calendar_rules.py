@@ -58,6 +58,37 @@ class TestHolidayGate(unittest.TestCase):
         self.assertIn("holiday", reason)
 
 
+class TestScheduledCadences(unittest.TestCase):
+    # 2026-06-22 is a Monday; 06-23 Tue; 06-20 Sat.
+    def test_weekly_defaults_to_monday(self):
+        a = _asset("equity", cadence="weekly", tz="America/New_York")
+        self.assertTrue(C.is_due(a, MON, holidays={})[0])
+        self.assertFalse(C.is_due(a, _at("2026-06-23 05:00"), holidays={})[0])
+
+    def test_weekly_cadence_day_override(self):
+        a = _asset("equity", cadence="weekly", tz="America/New_York")
+        a["cadence_day"] = "wed"
+        self.assertTrue(C.is_due(a, _at("2026-06-24 05:00"), holidays={})[0])   # Wed
+        self.assertFalse(C.is_due(a, MON, holidays={})[0])
+
+    def test_weekly_crypto_anchors_to_weekday_not_weekend(self):
+        a = _asset("crypto", cadence="weekly")
+        self.assertTrue(C.is_due(a, MON, holidays={})[0])
+        self.assertFalse(C.is_due(a, SAT, holidays={})[0])
+
+    def test_monthly_first_trading_day(self):
+        a = _asset("equity", cadence="monthly", tz="America/New_York")
+        # 2026-06-01 is a Monday -> first trading day of June
+        self.assertTrue(C.is_due(a, _at("2026-06-01 05:00"), holidays={})[0])
+        self.assertFalse(C.is_due(a, _at("2026-06-02 05:00"), holidays={})[0])
+
+    def test_monthly_skips_weekend_start(self):
+        # 2026-08-01 is a Saturday -> first trading day is Mon 2026-08-03
+        a = _asset("equity", cadence="monthly", tz="America/New_York")
+        self.assertFalse(C.is_due(a, _at("2026-08-01 05:00"), holidays={})[0])
+        self.assertTrue(C.is_due(a, _at("2026-08-03 05:00"), holidays={})[0])
+
+
 class TestGuards(unittest.TestCase):
     def test_disabled_not_due(self):
         self.assertFalse(C.is_due(_asset("crypto", enabled=False), MON, holidays={})[0])

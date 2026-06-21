@@ -109,11 +109,32 @@ def main():
         aws_secret_access_key=env["R2_SECRET_ACCESS_KEY"],
         region_name="auto",
     )
+    uploaded, vanished, failed = 0, [], []
     for path, key, ctype in items:
-        client.put_object(Bucket=env["R2_BUCKET"], Key=key,
-                          Body=path.read_bytes(), ContentType=ctype)
-        print(f"uploaded  {key}")
-    print(f"Done - {len(items)} file(s) to bucket '{env['R2_BUCKET']}'.")
+        if not path.exists():
+            # File discovered earlier but removed before upload (concurrent cleanup / new run):
+            # a benign race — skip it, don't crash the whole publish mid-loop.
+            vanished.append(key)
+            print(f"skipped   {key} (file no longer present)")
+            continue
+        try:
+            client.put_object(Bucket=env["R2_BUCKET"], Key=key,
+                              Body=path.read_bytes(), ContentType=ctype)
+            uploaded += 1
+            print(f"uploaded  {key}")
+        except Exception as ex:
+            failed.append(key)
+            print(f"FAILED    {key}: {str(ex)[:140]}", file=sys.stderr)
+    summary = f"Done - {uploaded} uploaded"
+    if vanished:
+        summary += f", {len(vanished)} vanished"
+    if failed:
+        summary += f", {len(failed)} FAILED"
+    print(summary + f" -> bucket '{env['R2_BUCKET']}'.")
+    if failed:
+        # Real upload errors are surfaced as a non-zero exit (the publish chain checks this),
+        # but only AFTER every file was attempted — no more aborting on the first failure.
+        sys.exit(1)
 
 
 if __name__ == "__main__":
