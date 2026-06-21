@@ -42,8 +42,10 @@ import os
 import sys
 from pathlib import Path
 
-# Latest capable Claude model — kept as a single constant so it is trivial to bump.
-DEFAULT_MODEL = "claude-opus-4-8"
+# Brief-writer model. Token-efficient default; override with ASSETFRAME_BRIEF_MODEL (or --model).
+# Sonnet 4.6 gives strong market analysis at a fraction of Opus's cost; set
+# "claude-haiku-4-5-20251001" for maximum savings, or "claude-opus-4-8" for maximum quality.
+DEFAULT_MODEL = os.environ.get("ASSETFRAME_BRIEF_MODEL", "claude-sonnet-4-6")
 DEFAULT_MAX_TOKENS = 20000  # a full brief is ~7k tok of JSON and web_search tool turns
                             # share this budget; 8000 truncated the JSON mid-object ->
                             # parse/validation fail -> needs_brief (see req-8104b5f4). Raised
@@ -52,8 +54,8 @@ DEFAULT_MAX_TOKENS = 20000  # a full brief is ~7k tok of JSON and web_search too
                             # stop_reason==max_tokens so it is diagnosable.
 # Per-million-token USD prices used only for the stderr cost estimate (best-effort;
 # the ledger records the live `usage` numbers, not this estimate). Override via env.
-PRICE_IN_PER_MTOK = float(os.environ.get("ANTHROPIC_PRICE_IN", "5.0"))
-PRICE_OUT_PER_MTOK = float(os.environ.get("ANTHROPIC_PRICE_OUT", "25.0"))
+PRICE_IN_PER_MTOK = float(os.environ.get("ANTHROPIC_PRICE_IN", "3.0"))     # Sonnet 4.6 defaults
+PRICE_OUT_PER_MTOK = float(os.environ.get("ANTHROPIC_PRICE_OUT", "15.0"))
 
 # --- enums (mirror taxonomy.py + the claim/quality vocab the scaffold enforces) ---
 PREDICTION_TYPES = ("breakout", "rejection", "continuation",
@@ -519,23 +521,40 @@ def author_brief(ticker, analysis, memory_pack, research, social, *, model,
 
     tot_in = tot_out = tot_web = 0
     last_err = None
-    # attempt 1 = author; attempt 2 = repair with the validation errors fed back.
-    for attempt in (1, 2):
-        try:
-            resp = client.messages.create(
-                model=model, max_tokens=max_tokens, system=system,
-                tools=tools, messages=messages,
-            )
-        except Exception as ex:                      # network / auth / rate limit
-            print(f"ERROR: Anthropic API call failed: {type(ex).__name__}: {ex}",
-                  file=sys.stderr)
-            sys.exit(3)
 
-        u = getattr(resp, "usage", None)
+    def _acc(r):                          # accumulate token + web-search usage across calls
+        nonlocal tot_in, tot_out, tot_web
+        u = getattr(r, "usage", None)
         tot_in += getattr(u, "input_tokens", 0) or 0
         tot_out += getattr(u, "output_tokens", 0) or 0
         srv = getattr(u, "server_tool_use", None)
-        tot_web += getattr(srv, "web_search_requests", 0) or 0 if srv else 0
+        tot_web += (getattr(srv, "web_search_requests", 0) or 0) if srv else 0
+
+    def _call():
+        try:
+            return client.messages.create(model=model, max_tokens=max_tokens, system=system,
+                                          tools=tools, messages=messages)
+        except Exception as ex:           # network / auth / rate limit
+            print(f"ERROR: Anthropic API call failed: {type(ex).__name__}: {ex}", file=sys.stderr)
+            sys.exit(3)
+
+    # attempt 1 = author; attempt 2 = repair with the validation errors fed back.
+    for attempt in (1, 2):
+        resp = _call()
+        _acc(resp)
+        # The server-side web_search tool can PAUSE the turn when its internal tool loop hits the
+        # iteration cap: the API returns stop_reason=='pause_turn' with the partial turn and NO
+        # finished JSON. RESUME the same turn by re-sending the conversation with the model's
+        # partial content appended (this is NOT a validation repair — no new user message). The
+        # research-heavy briefs this feature exists for are exactly the ones that pause, so
+        # without resuming they spuriously fail the schema gate and degrade the asset to
+        # needs_brief with a misleading "could not parse JSON". Bounded so a loop can't run away.
+        resumes = 0
+        while getattr(resp, "stop_reason", None) == "pause_turn" and resumes < 5:
+            resumes += 1
+            messages.append({"role": "assistant", "content": resp.content})
+            resp = _call()
+            _acc(resp)
 
         brief, perr = _extract_json(resp.content)
         errs = [perr] if perr else validate_brief(brief)

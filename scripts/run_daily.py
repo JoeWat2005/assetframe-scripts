@@ -105,15 +105,20 @@ def _parse_last_json(text):
 
 
 def parse_args(argv):
-    o = {"universe": "config/assets.json", "asset": None, "asset_class": None,
+    o = {"universe": "config/assets.json", "asset": [], "asset_class": None,
          "mode": "dry_run", "date": None, "as_of": None, "workers": 4, "no_render": False}
-    keys = {"--universe": "universe", "--asset": "asset", "--asset-class": "asset_class",
+    keys = {"--universe": "universe", "--asset-class": "asset_class",
             "--mode": "mode", "--date": "date", "--as-of": "as_of", "--workers": "workers"}
     i = 0
     while i < len(argv):
         a = argv[i]
         if a == "--no-render":
             o["no_render"] = True
+        elif a == "--asset":               # repeatable — a multi-asset scope keeps EVERY id
+            i += 1
+            if i >= len(argv):
+                print("ERROR: --asset needs a value"); sys.exit(2)
+            o["asset"].append(argv[i])
         elif a in keys:
             i += 1
             if i >= len(argv):
@@ -134,17 +139,24 @@ def resolve_now(o):
     if o["date"]:
         # treat --date as that date 06:00 Europe/London (the canonical run time)
         d = datetime.strptime(o["date"][:10], "%Y-%m-%d")
-        return (d.replace(hour=6, tzinfo=LONDON) if LONDON else d.replace(hour=6, tzinfo=timezone.utc)
-                ).astimezone(timezone.utc)
+        now = (d.replace(hour=6, tzinfo=LONDON) if LONDON else d.replace(hour=6, tzinfo=timezone.utc)
+               ).astimezone(timezone.utc)
+        # --date is a BACKDATE: forward it as the as-of moment so intraday + scaffold past-date
+        # the report too (no look-ahead), matching the already-backdated memory. Without this,
+        # `--date` alone produced a TODAY-dated, live-priced report under a past run folder.
+        if not o["as_of"]:
+            o["as_of"] = now.strftime("%Y-%m-%d %H:%M")
+        return now
     return datetime.now(timezone.utc)
 
 
 def select_assets(o):
     assets = config_loader.load_assets(o["universe"])
     if o["asset"]:
-        assets = [a for a in assets if a["id"] == o["asset"]]
+        ids = {a.strip().lower() for a in o["asset"]}
+        assets = [a for a in assets if a["id"].lower() in ids]
         if not assets:
-            print(f"ERROR: asset '{o['asset']}' not in {o['universe']}"); sys.exit(2)
+            print(f"ERROR: none of assets {sorted(ids)} in {o['universe']}"); sys.exit(2)
     elif o["asset_class"]:
         assets = [a for a in assets if a["asset_class"] == o["asset_class"]]
     return assets
@@ -318,6 +330,18 @@ def _safe_unlink(path):
         pass
 
 
+def _stamp_authored_brief(path, run_day):
+    """Mark a freshly AUTHORED brief with its run date so the NEXT day's run regenerates it
+    (operator-written briefs carry no marker and are kept). Best-effort; never raises."""
+    try:
+        b = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+        b["_af_authored"] = True
+        b["_af_date"] = run_day
+        Path(path).write_text(json.dumps(b, indent=1) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _sum_token_cost(token_cost):
     """Roll the writer + critic per-call telemetry into one per-asset cost summary
     for the manifest record."""
@@ -398,6 +422,18 @@ def generate_asset(asset, now, no_render, as_of=None):
     # now exists and the pipeline continues. A keyless run, a writer failure, a reject,
     # or a stand-aside all degrade gracefully (no scaffold) with a recorded reason.
     brief = BRIEF_DIR / f"{tk}_research_brief.json"
+    # Fresh brief per day: an AI-AUTHORED brief is regenerated each run-date so the WRITTEN
+    # analysis is fresh daily (downstream prices/levels/predictions are always recomputed; the
+    # prose must update too). A hand-written OPERATOR brief (no _af_authored marker) is honoured
+    # as-is and never auto-purged. Re-running the same date reuses today's brief (no double spend).
+    run_day = now.strftime("%Y-%m-%d")
+    if brief.exists():
+        try:
+            _ex = json.loads(brief.read_text(encoding="utf-8-sig"))
+        except Exception:
+            _ex = {}
+        if _ex.get("_af_authored") and _ex.get("_af_date") != run_day:
+            _safe_unlink(brief)          # stale auto-brief -> re-author fresh below
     rec["brief_source"] = "operator"
     if not brief.exists():
         if not BRIEF_AUTHORING:
@@ -422,6 +458,7 @@ def generate_asset(asset, now, no_render, as_of=None):
             rec["duration_s"] = round(time.time() - t0, 1)
             return rec
         rec["stages"]["brief"] = "authored"
+        _stamp_authored_brief(brief, run_day)   # mark fresh AI brief so tomorrow regenerates it
 
     # 3.5 per-instrument ledger context (the confidence engine's "memory"): turn THIS
     # instrument's own closed, scored windows into hit-rate priors as-of `now`. No
@@ -475,8 +512,14 @@ def main():
                 "universe": o["universe"], "assets_selected": len(assets),
                 "assets_due": len(due_assets), "plan": plan}
 
-    print(f"[{run_id}] mode={o['mode']} | selected={len(assets)} due={len(due_assets)} "
+    print(f"[{run_id}] mode={o['mode']} @ {now.strftime('%Y-%m-%d %H:%M')} UTC | "
+          f"selected={len(assets)} due={len(due_assets)} "
           f"({', '.join(a['id'] for a in due_assets) or 'none'})")
+    # Explain every NON-due asset (market closed / disabled) so the dashboard log makes a quiet
+    # day self-explanatory instead of just showing a lower count.
+    for p in plan:
+        if p["decision"] == "skip":
+            print(f"  - skip {p['asset_id']}: {p['reason']}")
 
     if o["mode"] in ("score_only", "production"):
         print("scoring closed windows + refreshing memory...")
@@ -484,6 +527,12 @@ def main():
         s = manifest["score"]
         print(f"  scored={len(s['scored'])} skipped={len(s['skipped'])} errors={len(s['errors'])} "
               f"refresh={s['memory_refresh']}")
+        for sc in s["scored"]:
+            print(f"    + scored {sc.get('report_id') or sc.get('file')}: hit_rate={sc.get('hit_rate_pct')}")
+        for sk in s["skipped"][:12]:
+            print(f"    . skip {sk.get('file')}: {sk.get('reason')}")
+        for er in s["errors"][:12]:
+            print(f"    ! error {er.get('file')}: {er.get('error') or er.get('report_id')}")
 
     if o["mode"] in ("generate_only", "production"):
         print(f"generating {len(due_assets)} due asset(s) with {o['workers']} worker(s)...")
@@ -508,7 +557,9 @@ def main():
                         bits.append(str(reason)[:240])
                     if bits:
                         note = "  ->  " + " | ".join(bits)
-                print(f"  {rec['ticker']:8} {rec['status']:14} "
+                src = rec.get("brief_source") or ""
+                src_tag = f"[{src}]" if src else ""
+                print(f"  {rec['ticker']:8} {rec['status']:14} {src_tag:12} "
                       f"{rec.get('report_id') or ''} ({rec.get('duration_s')}s){note}")
         manifest["jobs"] = sorted(jobs, key=lambda r: r["asset_id"])
         manifest["generated"] = sum(1 for j in jobs if j["status"] in ("generated", "forecast_only"))
@@ -516,6 +567,15 @@ def main():
         manifest["brief_rejected"] = [j["ticker"] for j in jobs if j["status"] == "brief_rejected"]
         manifest["brief_stand_aside"] = [j["ticker"] for j in jobs if j["status"] == "brief_stand_aside"]
         manifest["token_cost"] = _total_token_cost(j.get("token_cost") for j in jobs)
+
+    if o["mode"] in ("generate_only", "production"):
+        tc = manifest.get("token_cost", {})
+        print(f"[{run_id}] generation done — generated={manifest.get('generated', 0)} "
+              f"needs_brief={len(manifest.get('needs_brief', []))} "
+              f"rejected={len(manifest.get('brief_rejected', [])) + len(manifest.get('brief_stand_aside', []))} "
+              f"of {len(due_assets)} due · "
+              f"~{tc.get('input_tokens', 0)}in/{tc.get('output_tokens', 0)}out tok "
+              f"≈${tc.get('est_cost_usd', 0)}")
 
     # always write the manifest (dry_run writes the plan only)
     run_dir = ROOT / "runs" / run_date

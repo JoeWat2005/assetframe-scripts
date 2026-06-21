@@ -29,7 +29,6 @@ import ledger_context as LC
 import research_memory as RM
 
 CALIB_MAP = Path("ledger/calibration_map.json")
-RESEARCH_MEMORY = Path("ledger/research_memory.json")
 DEFAULT_LEDGER = Path("ledger/outcome_ledger.csv")
 TOKEN_BUDGET = 1500          # approx ceiling for the whole pack
 MAX_LESSONS = 8

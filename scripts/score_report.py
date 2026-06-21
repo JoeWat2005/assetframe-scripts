@@ -232,12 +232,18 @@ def main():
     now = datetime.now(timezone.utc)
     wend = parse_dt(p["window_end_utc"])
     partial = False
+    open_preview = False
     if now < wend:
         if not opts["force"]:
             print(f"window still open until {p['window_end_utc']} UTC - not scored "
-                  f"(use --force for a partial score)")
+                  f"(use --force for a PREVIEW; an open window is never written to the ledger)")
             return
+        # Forced score of a GENUINELY OPEN window = a PREVIEW only, never appended: the
+        # append-only ledger dedups on report_id, so a premature partial row would permanently
+        # block the correct final score after the window truly closes. (The legitimate
+        # early-close partial below — window ended but the CSV stops short — is still written.)
         partial = True
+        open_preview = True
         wend = now
     csv_path = opts["hourly"] or p["hourly_csv"]
     bars = load_bars(csv_path, parse_dt(p["window_start_utc"]), wend)
@@ -286,7 +292,7 @@ def main():
         print(f"report_id {p['report_id']} already scored in the ledger - skipped "
               f"(append-only; use --force-rescore to re-score deliberately)")
 
-    if not opts["dry_run"] and not duplicate:
+    if not opts["dry_run"] and not duplicate and not open_preview:
         LEDGER.parent.mkdir(parents=True, exist_ok=True)
         new_file = not LEDGER.exists()
         with open(LEDGER, "a", newline="", encoding="utf-8") as f:
@@ -300,16 +306,18 @@ def main():
     if LEDGER.exists():
         with open(LEDGER, newline="", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
-    if opts["dry_run"] and not duplicate:
+    if (opts["dry_run"] or open_preview) and not duplicate:
         rows = rows + [dict(zip(LEDGER_COLS, [str(x) for x in row]))]
     if opts["dry_run"]:
         print("DRY RUN - ledger not written")
+    if open_preview:
+        print("PREVIEW - window still open; partial result NOT written to the ledger")
     tot_h = sum(int(r["hits"] or 0) for r in rows)
     tot_m = sum(int(r["misses"] or 0) for r in rows)
     cum = round(100 * tot_h / (tot_h + tot_m), 1) if (tot_h + tot_m) else None
 
     summary = {"report_id": p["report_id"], "partial": partial, "dry_run": opts["dry_run"],
-               "skipped_duplicate": duplicate,
+               "preview": open_preview, "skipped_duplicate": duplicate,
                "results": results, "hit_rate_pct": rate, "unresolved_manual": unresolved,
                "setup_filled": filled, "setup_outcome": outcome,
                "ledger_reports": len(rows), "cumulative_hit_rate_pct": cum}

@@ -63,27 +63,42 @@ def is_trading_day(asset, d, holidays=None):
     return d.weekday() < 5 and not is_holiday(asset, d, holidays)
 
 
+_OPEN_CADENCES = ("daily", "weekday", "trading_day", "weekday_or_market_open")
+
+
 def is_due(asset, now=None, holidays=None):
-    """(due: bool, reason: str) — whether to GENERATE a report for `asset` now.
-    `now` defaults to UTC now; naive datetimes are treated as UTC."""
+    """(due: bool, reason: str) — whether to GENERATE a report for `asset` now. `now` defaults
+    to UTC now; naive datetimes are treated as UTC.
+
+    GENERATION gate ONLY — scoring of already-closed prediction windows runs separately
+    (run_daily.score_step) and is NEVER gated here, so Friday's calls are still graded over the
+    weekend. Crypto trades 24/7 and is always due. EVERY other asset class (fx, equity, index,
+    commodity, futures) has closed sessions — forex closes Fri night→Sun night; equities,
+    commodities and futures close weekends + exchange holidays — so a CLOSED market produces no
+    new report until it reopens, EVEN when cadence is 'daily'. The 05:00 UTC pre-session run
+    targets that day's local session; weekends/holidays are rejected until the market reopens."""
     if not asset.get("enabled", True):
         return False, "disabled"
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     holidays = holidays if holidays is not None else load_holidays()
+    cls = (asset.get("asset_class") or "").lower()
     cadence = asset.get("cadence", "weekday")
     d = _target_date(asset, now)
     wd = d.weekday()  # Mon=0 .. Sun=6
 
-    if cadence == "daily":
-        return True, "daily cadence (24/7)"
-    if wd >= 5:                                   # every other cadence is weekday-gated
-        return False, f"weekend ({d:%a} {d.isoformat()})"
-    if cadence == "weekday":
-        return True, "weekday cadence"
-    if cadence in ("trading_day", "weekday_or_market_open"):
-        if is_holiday(asset, d, holidays):
-            return False, f"market holiday ({d.isoformat()})"
-        return True, f"{cadence} (open {d.isoformat()})"
+    # Crypto: 24/7/365, always due.
+    if cls == "crypto":
+        if cadence in _OPEN_CADENCES:
+            return True, "crypto 24/7"
+        return False, f"unknown cadence '{cadence}'"
+
+    # Every other class closes — reject GENERATION when the market is shut (weekend / holiday).
+    if wd >= 5:
+        return False, f"market closed - weekend ({d:%a} {d.isoformat()})"
+    if is_holiday(asset, d, holidays):
+        return False, f"market closed - holiday ({d.isoformat()})"
+    if cadence in _OPEN_CADENCES:
+        return True, f"{cls or 'market'} session ({d.isoformat()})"
     return False, f"unknown cadence '{cadence}'"

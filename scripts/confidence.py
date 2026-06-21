@@ -27,7 +27,7 @@ high-impact catalyst INSIDE the prediction window 60 · engine errors 65.
 Every output carries `components` (for the Pro scorecard) and `caps_applied`,
 so the published number is fully explainable. Pure stdlib.
 """
-from taxonomy import confidence_band
+from taxonomy import confidence_band, validate_prediction_type
 
 CONF_VERSION = 2                       # bumped from the freehand era (v1) so calibration can filter
 WEIGHTS = {"market": 50, "ledger": 30, "catalyst": 20}   # tunable; calibration is ground truth
@@ -382,7 +382,9 @@ def _apply_calibration(score, calib):
 def compute_confidence(analysis, setup, brief=None, research_pack=None,
                        social_pack=None, ledger_context=None, calib=None,
                        options_included=False, levels=None):
-    pred_type = ((brief or {}).get("primary_prediction") or {}).get("type")
+    # Canonicalize with the SAME default scaffold stamps onto the ledger row, so the ledger
+    # lookups (ledger_confidence / _ledger_failure) match the stored pred_type instead of None.
+    pred_type = validate_prediction_type(((brief or {}).get("primary_prediction") or {}).get("type", "range_hold"))
     m, m_sub = market_confidence(analysis, setup, levels=levels, options_included=options_included)
     l, l_sub = ledger_confidence(ledger_context, pred_type)
     c, c_sub = catalyst_confidence(brief, research_pack)

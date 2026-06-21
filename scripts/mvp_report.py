@@ -804,10 +804,14 @@ def run_qa(p):
     hourly_cfg = next((ch for ch in p["pro"]["charts"] if "hourly" in ch["csv"].lower()
                        or ch.get("display_days", 99) <= 30), p["pro"]["charts"][-1])
     rows = rp.read_series(Path(hourly_cfg["csv"]))
-    csv_last = rows[-1]["c"]
-    ok_price = abs(csv_last - last) <= max(0.01, last * 1e-5)
-    if not ok_price:
-        errs.append(f"canonical last {last} != hourly CSV last close {csv_last}")
+    if not rows:
+        # A degraded/empty hourly CSV must FAIL QA cleanly, not crash on rows[-1].
+        errs.append(f"hourly CSV {hourly_cfg['csv']} has no rows - cannot verify the canonical price")
+    else:
+        csv_last = rows[-1]["c"]
+        ok_price = abs(csv_last - last) <= max(0.01, last * 1e-5)
+        if not ok_price:
+            errs.append(f"canonical last {last} != hourly CSV last close {csv_last}")
     if str(meta.get("last_price", "")).strip() == "":
         errs.append("meta.last_price empty")
     free_chart_same = p["free"]["chart"]["csv"] == hourly_cfg["csv"]

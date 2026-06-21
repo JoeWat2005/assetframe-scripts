@@ -108,8 +108,12 @@ def _streak(rows, recent_k=RECENT_K):
 
 def build_context(name, rows, ticker=None, asset_class=None, recent_k=RECENT_K):
     ticker = (ticker or name).upper()
-    inst_rows = [r for r in rows if r["_ticker"] == ticker
-                 or name.lower() in (r.get("instrument") or "").lower()]
+    # Match the instrument by its EXACT ticker only. The production caller passes the short
+    # ticker as `name` too, so a substring "name in instrument" fallback would leak unrelated
+    # instruments' rows into this one's hit rate (e.g. 'es' is inside 'British Pound / Japanese
+    # Yen'), biasing the published per-instrument confidence. The ticker match already covers
+    # every legitimate row for this instrument.
+    inst_rows = [r for r in rows if r["_ticker"] == ticker]
     cls_rows = [r for r in rows if asset_class
                 and (r.get("asset_class") or "").strip() == asset_class]
 

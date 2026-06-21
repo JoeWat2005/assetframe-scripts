@@ -43,7 +43,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 RUN_DAILY = SCRIPTS / "run_daily.py"
 LOCK_PATH = ROOT / ".run.lock"          # serialises run_daily across timer + poller
-LOG_EXCERPT_BYTES = 8 * 1024            # last ~8KB of combined stdout/stderr
+LOG_EXCERPT_BYTES = 24 * 1024           # last ~24KB of combined stdout/stderr (richer dashboard log)
 
 
 def _int_env(name, default):
@@ -664,12 +664,15 @@ def _finish_request(conn, request_id, status, run_id, error):
 # key is attack surface, so keep it minimal). Never secrets/credentials/URLs.
 _SETTABLE_CONFIG_KEYS = {
     "ASSETFRAME_AUTHOR_BRIEFS", "ADVISOR_DATA_PROVIDER", "ASSETFRAME_RUN_TIMEOUT",
+    "ASSETFRAME_BRIEF_MODEL",
 }
 # Per-key value validators — reject a value that would brick the box via an allow-listed key. In
 # particular ASSETFRAME_RUN_TIMEOUT is int()-parsed at import; a non-integer would crash-loop the
 # poller. A key with no validator only gets the generic single-line / length check.
 _CONFIG_VALUE_VALIDATORS = {
     "ASSETFRAME_RUN_TIMEOUT": lambda v: v.isdigit() and 60 <= int(v) <= 86400,
+    # Brief model must be a Claude id (a typo here would break every brief). Allow-list shape only.
+    "ASSETFRAME_BRIEF_MODEL": lambda v: v.startswith("claude-") and 8 <= len(v) <= 60,
 }
 # tail_logs may only read these systemd units (prevents arbitrary -u injection).
 _KNOWN_POLLER_UNITS = {"assetframe-poller.service", "assetframe-poller-dev.service"}
