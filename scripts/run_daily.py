@@ -39,7 +39,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -494,6 +494,59 @@ def generate_asset(asset, now, no_render, as_of=None):
     return rec
 
 
+# --------------------------------------------------------------- storage retention
+# What grows on the box vs what is overwritten in place:
+#   * data/{analysis,candles,briefs,memory_packs,ledger_context,payloads,predictions} hold ONE
+#     file per asset, REWRITTEN every run -> constant size, nothing to prune.
+#   * ledger/* is the append-only track record + its derived maps -> tiny, NEVER pruned.
+#   * reports/<YYYY-MM-DD>/ and runs/<YYYY-MM-DD>/ are the only things that accumulate. Reports
+#     are pushed to R2 (the web serves from there), so the local copies are a redundant cache;
+#     run manifests are logs. Both are pruned past a retention window.
+_RETENTION_DIRS = ("reports", "runs")
+_RETENTION_DEFAULT_DAYS = 14
+
+
+def _retention_days(default=_RETENTION_DEFAULT_DAYS):
+    """Days of reports/runs editions to keep locally. ASSETFRAME_RETENTION_DAYS overrides;
+    0 (or negative) disables pruning entirely (keep everything)."""
+    try:
+        return int(os.environ.get("ASSETFRAME_RETENTION_DAYS", default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _prune_old_dated_dirs(keep_days, today):
+    """Delete YYYY-MM-DD folders older than keep_days under reports/ and runs/. The ledger,
+    config and the per-asset data/ working files are never touched. Best-effort: never raises.
+    `today` is wall-clock UTC date (so a backdated --as-of run can't mis-date the cutoff)."""
+    summary = {"keep_days": keep_days, "removed": [], "kept": 0, "errors": 0}
+    if not keep_days or keep_days <= 0:
+        summary["disabled"] = True
+        return summary
+    import shutil
+    cutoff = today - timedelta(days=keep_days)
+    for sub in _RETENTION_DIRS:
+        d = ROOT / sub
+        if not d.is_dir():
+            continue
+        for child in sorted(d.iterdir()):
+            if not child.is_dir():
+                continue
+            try:
+                folder_date = datetime.strptime(child.name, "%Y-%m-%d").date()
+            except ValueError:
+                continue                      # not a dated folder (e.g. "_archive") -> keep it
+            if folder_date < cutoff:
+                try:
+                    shutil.rmtree(child, ignore_errors=True)
+                    summary["removed"].append(f"{sub}/{child.name}")
+                except Exception:
+                    summary["errors"] += 1
+            else:
+                summary["kept"] += 1
+    return summary
+
+
 def main():
     o = parse_args(sys.argv[1:])
     now = resolve_now(o)
@@ -579,6 +632,16 @@ def main():
               f"of {len(due_assets)} due · "
               f"~{tc.get('input_tokens', 0)}in/{tc.get('output_tokens', 0)}out tok "
               f"≈${tc.get('est_cost_usd', 0)}")
+
+    # storage retention: prune old reports/ + runs/ edition folders (redundant after R2 publish;
+    # the ledger/track record is never touched). Skipped on dry runs. Uses wall-clock UTC today.
+    if o["mode"] != "dry_run":
+        manifest["retention"] = _prune_old_dated_dirs(_retention_days(),
+                                                      datetime.now(timezone.utc).date())
+        _r = manifest["retention"]
+        if _r.get("removed"):
+            print(f"retention: pruned {len(_r['removed'])} folder(s) older than "
+                  f"{_r['keep_days']}d (reports/runs) — local copies; R2 + ledger untouched")
 
     # always write the manifest (dry_run writes the plan only)
     run_dir = ROOT / "runs" / run_date
