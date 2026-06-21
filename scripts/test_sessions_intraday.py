@@ -32,6 +32,29 @@ class TestCrypto247(unittest.TestCase):
         self.assertEqual(s["next_maintenance_break"], "none scheduled (venue-dependent)")
 
 
+class TestDSTSessionBoundaries(unittest.TestCase):
+    """Session boundaries are derived from the venue's local time via zoneinfo, so they shift
+    automatically with DST. Summer (EDT/CDT) must match the legacy hardcoded UTC; winter
+    (EST/CST) must move +1h."""
+    def _w(self, prof, y, mo, d, h):
+        s = SS.get_session(prof, now=datetime(y, mo, d, h, 0, tzinfo=timezone.utc))
+        return s["window_start_utc"], s["window_end_utc"]
+
+    def test_equity_summer_unchanged(self):
+        self.assertEqual(self._w("us_equity_rth", 2026, 6, 15, 5), ("2026-06-15 13:30", "2026-06-15 20:00"))
+
+    def test_equity_winter_shifts_one_hour(self):
+        self.assertEqual(self._w("us_equity_rth", 2026, 12, 14, 5), ("2026-12-14 14:30", "2026-12-14 21:00"))
+
+    def test_cme_winter_next_session(self):
+        # Sat 2026-12-12 -> next session Sun 17:00 CST (23:00 UTC) -> Mon 16:00 CST (22:00 UTC)
+        self.assertEqual(self._w("cme_futures", 2026, 12, 12, 10), ("2026-12-13 23:00", "2026-12-14 22:00"))
+
+    def test_fx_winter_weekly_close(self):
+        s = SS.get_session("fx_spot", now=datetime(2026, 12, 18, 6, 0, tzinfo=timezone.utc))
+        self.assertEqual(s["market_close_utc"], "2026-12-18 22:00")  # Fri 17:00 EST
+
+
 class TestGetWindow(unittest.TestCase):
     PROFILES = ("cme_futures", "fx_spot", "us_equity_rth", "crypto_24_7")
     MOMENTS = (datetime(2026, 6, 15, 5, 0, tzinfo=timezone.utc),

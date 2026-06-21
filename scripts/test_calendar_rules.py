@@ -98,5 +98,44 @@ class TestGuards(unittest.TestCase):
         self.assertFalse(C.is_due(_asset("crypto", cadence="lunar"), MON, holidays={})[0])
 
 
+class TestComputedHolidays(unittest.TestCase):
+    def test_us_known_dates_any_year(self):
+        us28 = C.computed_holidays("US", 2028)
+        self.assertIn("2028-01-17", us28)   # MLK (3rd Mon Jan)
+        self.assertIn("2028-05-29", us28)   # Memorial (last Mon May)
+        self.assertIn("2028-09-04", us28)   # Labor (1st Mon Sep)
+        self.assertIn("2028-11-23", us28)   # Thanksgiving (4th Thu Nov)
+        self.assertIn("2028-04-14", us28)   # Good Friday (Easter 2028-04-16)
+        self.assertIn("2028-06-19", us28)   # Juneteenth (Mon, 19th is a Mon in 2028? observed)
+
+    def test_us_independence_observed_when_saturday(self):
+        # 2026-07-04 is a Saturday -> NYSE observes Friday 2026-07-03
+        us26 = C.computed_holidays("US", 2026)
+        self.assertIn("2026-07-03", us26)
+        self.assertNotIn("2026-07-04", us26)
+
+    def test_us_new_year_saturday_not_observed(self):
+        # 2028-01-01 falls on a Saturday -> NO observed closure (special NYSE rule)
+        self.assertNotIn("2028-01-01", C.computed_holidays("US", 2028))
+        self.assertNotIn("2027-12-31", C.computed_holidays("US", 2028))
+
+    def test_uk_known_dates_and_substitute(self):
+        uk27 = C.computed_holidays("UK", 2027)
+        self.assertIn("2027-03-26", uk27)   # Good Friday
+        self.assertIn("2027-03-29", uk27)   # Easter Monday
+        self.assertIn("2027-05-03", uk27)   # Early May (1st Mon)
+        self.assertIn("2027-08-30", uk27)   # Summer (last Mon Aug)
+        # 2027-12-25 is a Saturday -> substitutes Mon 27 + Tue 28
+        self.assertIn("2027-12-27", uk27)
+        self.assertIn("2027-12-28", uk27)
+
+    def test_is_holiday_uses_computed_without_json(self):
+        a = _asset("equity", tz="America/New_York")
+        # MLK 2030 (3rd Mon Jan = 2030-01-21) — empty json, must still be a holiday
+        due, reason = C.is_due(a, _at("2030-01-21 15:00"), holidays={})
+        self.assertFalse(due)
+        self.assertIn("holiday", reason)
+
+
 if __name__ == "__main__":
     unittest.main()

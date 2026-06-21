@@ -13,45 +13,51 @@ from datetime import datetime, timedelta, timezone
 
 UTC = timezone.utc
 
+# Session boundaries are defined in the venue's LOCAL time (*_local + tz) and converted to UTC
+# per-date via zoneinfo, so DST is handled automatically forever. The *_local times are the real
+# exchange clock (CME 16:00 CT close, NYSE 09:30-16:00 ET, FX 17:00 ET close). The plain UTC
+# tuples are a no-zoneinfo fallback (current-regime values) and are otherwise unused.
 PROFILES = {
-    # CME Globex metals/energy/equity-index: Sun 22:00 UTC open, Fri 21:00 UTC
-    # weekly close, daily maintenance 21:00-22:00 UTC Mon-Thu.
+    # CME Globex metals/energy/equity-index: Sun 17:00 CT open, Fri 16:00 CT weekly close,
+    # daily maintenance 16:00-17:00 CT Mon-Thu.
     "cme_futures": {
-        "label": "CME Globex futures (23h sessions, daily 21:00-22:00 UTC maintenance)",
+        "label": "CME Globex futures (23h sessions; daily maintenance 16:00-17:00 CT)",
         "type": "futures_23h",
-        "weekly_close": ("FRI", "21:00"),
-        "weekly_open": ("SUN", "22:00"),
-        "daily_break": ("21:00", "22:00"),
+        "tz": "America/Chicago",
+        "weekly_close": ("FRI", "21:00"), "weekly_close_local": ("FRI", "16:00"),
+        "weekly_open": ("SUN", "22:00"), "weekly_open_local": ("SUN", "17:00"),
+        "daily_break": ("21:00", "22:00"), "daily_break_local": ("16:00", "17:00"),
         "prose": [
-            "CME Globex: ~23h/day Sun 22:00 UTC -> Fri 21:00 UTC, daily maintenance break 21:00-22:00 UTC (Mon-Thu).",
-            "Weekly close Friday 21:00 UTC; weekend headlines land while the market is shut - gap risk realises at the Sunday 22:00 UTC reopen.",
+            "CME Globex: ~23h/day, Sun 17:00 CT -> Fri 16:00 CT, daily maintenance 16:00-17:00 CT (Mon-Thu). UTC equivalents shift ~1h with US daylight saving.",
+            "Weekly close Friday 16:00 CT; weekend headlines land while the market is shut - gap risk realises at the Sunday 17:00 CT reopen.",
             "Front-month continuous series used; contract month labelled in metadata. Roll risk flagged when within ~1 week of expiry.",
         ],
     },
-    # Spot FX: ~24/5, Sun ~21:05 UTC open to Fri ~21:00 UTC close (June DST).
+    # Spot FX: ~24/5, Sun ~17:05 ET open to Fri 17:00 ET (5pm New York) close.
     "fx_spot": {
-        "label": "Spot FX 24/5 (Sun ~21:05 UTC -> Fri ~21:00 UTC)",
+        "label": "Spot FX 24/5 (Sun ~17:05 ET -> Fri 17:00 ET, the 5pm New York close)",
         "type": "fx_24_5",
-        "weekly_close": ("FRI", "21:00"),
-        "weekly_open": ("SUN", "21:05"),
+        "tz": "America/New_York",
+        "weekly_close": ("FRI", "21:00"), "weekly_close_local": ("FRI", "17:00"),
+        "weekly_open": ("SUN", "21:05"), "weekly_open_local": ("SUN", "17:05"),
         "daily_break": None,
         "prose": [
-            "Spot FX trades ~24/5: Sun ~21:05 UTC -> Fri ~21:00 UTC. Sessions: Asia ~00:00-08:00, London ~07:00-16:00, New York ~12:00-21:00 UTC.",
-            "Rollover/value-date window ~21:00-22:15 UTC is illiquid - no fresh entries there unless explicitly labelled.",
+            "Spot FX trades ~24/5: Sun ~17:05 ET -> Fri 17:00 ET (UTC shifts with US DST). Sessions: Asia, London and New York roll continuously around the clock.",
+            "The rollover/value-date window around the 17:00 ET close is illiquid - no fresh entries there unless explicitly labelled.",
             "Weekend gaps are routine around geopolitical headlines; windows end at the weekly close unless modelling the gap.",
         ],
     },
-    # US single stock / ETF (Nasdaq/NYSE): pre-market 08:00-13:30 UTC, regular
-    # 13:30-20:00 UTC, after-hours 20:00-00:00 UTC (EDT regime, June). The
-    # prediction window targets the NEXT REGULAR session only.
+    # US single stock / ETF (Nasdaq/NYSE): regular session 09:30-16:00 ET; pre/after-hours
+    # trade thin. The prediction window targets the NEXT REGULAR session only.
     "us_equity_rth": {
-        "label": "US equity (Nasdaq) - pre-market 08:00-13:30, regular 13:30-20:00, after-hours 20:00-00:00 UTC (EDT regime)",
+        "label": "US equity (Nasdaq/NYSE) - regular session 09:30-16:00 ET",
         "type": "equity_rth",
-        "rth": ("13:30", "20:00"),
+        "tz": "America/New_York",
+        "rth": ("13:30", "20:00"), "rth_local": ("09:30", "16:00"),
         "prose": [
-            "Nasdaq regular session 13:30-20:00 UTC (14:30-21:00 UK in June); pre-market 08:00-13:30 UTC and after-hours 20:00-00:00 UTC trade thin.",
+            "US regular session 09:30-16:00 ET (UTC shifts with US daylight saving); pre-market and after-hours trade thin.",
             "Tradable levels in this report are REGULAR-SESSION levels (unadjusted prices); extended-hours prints are labelled separately and must not be mixed with them.",
-            "The prediction window is the next REGULAR session only; pre-market gaps realise at the 14:30 UK open. Weekends/holidays skipped via the exchange calendar.",
+            "The prediction window is the next REGULAR session only; pre-market gaps realise at the opening bell. Weekends/holidays skipped via the exchange calendar.",
             "Earnings before the open or after the close define their own risk window - flagged on the timeline when within ~3 weeks.",
         ],
     },
@@ -74,7 +80,29 @@ PROFILES = {
 _WD = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4, "SAT": 5, "SUN": 6}
 
 
+def _zone_ok():
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo("America/New_York")
+        return True
+    except Exception:           # bare box without an IANA tz database (the OCI Linux box has one)
+        return False
+
+
+_TZ_OK = _zone_ok()
+
+
+def _local_to_utc(d, hhmm, zone):
+    """UTC datetime for local time hhmm (HH:MM) on calendar date `d` in IANA `zone`,
+    DST-correct via zoneinfo."""
+    from zoneinfo import ZoneInfo
+    h, m = int(hhmm[:2]), int(hhmm[3:5])
+    return datetime(d.year, d.month, d.day, h, m, tzinfo=ZoneInfo(zone)).astimezone(UTC)
+
+
 def _next_weekday_time(now, wd_name, hhmm, forward=True):
+    """Next occurrence (>= now if forward) of weekday wd_name at UTC time hhmm. The
+    no-zoneinfo fallback path (the times are then interpreted as UTC)."""
     wd, (h, m) = _WD[wd_name], (int(hhmm[:2]), int(hhmm[3:5]))
     cand = now.replace(hour=h, minute=m, second=0, microsecond=0)
     delta = (wd - now.weekday()) % 7
@@ -82,6 +110,44 @@ def _next_weekday_time(now, wd_name, hhmm, forward=True):
     if forward and cand <= now:
         cand += timedelta(days=7)
     return cand
+
+
+def _profile_weekday_time(now, profile_key, key, forward=True):
+    """UTC instant of the next occurrence of a profile boundary (profile[key] = (WEEKDAY,'HH:MM'))
+    — interpreted in the venue's LOCAL zone (DST-correct) when zoneinfo is available, else as the
+    stored UTC fallback. `key` is 'weekly_close' or 'weekly_open'."""
+    p = PROFILES[profile_key]
+    local, zone = p.get(key + "_local"), p.get("tz")
+    if not (_TZ_OK and local and zone):
+        return _next_weekday_time(now, *p[key], forward=forward)
+    wd_name, hhmm = local
+    base = now.date()
+    d = base + timedelta(days=(_WD[wd_name] - base.weekday()) % 7)
+    cand = _local_to_utc(d, hhmm, zone)
+    if forward and cand <= now:
+        cand = _local_to_utc(d + timedelta(days=7), hhmm, zone)
+    return cand
+
+
+def _local_close_on(profile_key, d, hhmm_key="weekly_close"):
+    """UTC instant of the venue's local daily/weekly close time on calendar date `d`."""
+    p = PROFILES[profile_key]
+    local, zone = p.get(hhmm_key + "_local"), p.get("tz")
+    if _TZ_OK and local and zone:
+        return _local_to_utc(d, local[1], zone)
+    return datetime(d.year, d.month, d.day, int(p[hhmm_key][1][:2]),
+                    int(p[hhmm_key][1][3:5]), tzinfo=UTC)
+
+
+def _equity_rth(profile_key, d):
+    """(open_utc, close_utc) of the regular session on calendar date `d`, DST-correct."""
+    p = PROFILES[profile_key]
+    local, zone = p.get("rth_local"), p.get("tz")
+    if _TZ_OK and local and zone:
+        return _local_to_utc(d, local[0], zone), _local_to_utc(d, local[1], zone)
+    base = datetime(d.year, d.month, d.day, tzinfo=UTC)
+    return (base.replace(hour=int(p["rth"][0][:2]), minute=int(p["rth"][0][3:5])),
+            base.replace(hour=int(p["rth"][1][:2]), minute=int(p["rth"][1][3:5])))
 
 
 def _fmt(dt):
@@ -108,10 +174,7 @@ def get_session(profile_key, now=None, min_remaining_min=90, friday_cutoff_min=2
     }
 
     if p["type"] == "equity_rth":
-        (oh, om), (ch, cm) = ((int(p["rth"][0][:2]), int(p["rth"][0][3:5])),
-                              (int(p["rth"][1][:2]), int(p["rth"][1][3:5])))
-        rth_open = now.replace(hour=oh, minute=om, second=0, microsecond=0)
-        rth_close = now.replace(hour=ch, minute=cm, second=0, microsecond=0)
+        rth_open, rth_close = _equity_rth(profile_key, now.date())
         in_rth = (now.weekday() < 5 and now.date() not in holiday_dates
                   and rth_open <= now < rth_close)
         remaining = (rth_close - now).total_seconds() / 60 if in_rth else 0
@@ -125,8 +188,7 @@ def get_session(profile_key, now=None, min_remaining_min=90, friday_cutoff_min=2
             if not in_rth and now.weekday() < 5 and now < rth_open \
                     and now.date() not in holiday_dates:
                 nxt = now  # later today
-            start = nxt.replace(hour=oh, minute=om, second=0, microsecond=0)
-            end = nxt.replace(hour=ch, minute=cm, second=0, microsecond=0)
+            start, end = _equity_rth(profile_key, nxt.date())
             if now.weekday() >= 5 or now.date() in holiday_dates:
                 state = "closed_weekend_or_holiday"
             elif now < rth_open:
@@ -159,12 +221,12 @@ def get_session(profile_key, now=None, min_remaining_min=90, friday_cutoff_min=2
         })
         return out
 
-    wc = _next_weekday_time(now, *p["weekly_close"])
-    wo = _next_weekday_time(now, *p["weekly_open"])
+    wc = _profile_weekday_time(now, profile_key, "weekly_close")
+    wo = _profile_weekday_time(now, profile_key, "weekly_open")
     # weekend = between the most recent Friday close and the Sunday open after it
     prev_close = wc - timedelta(days=7) if wc > now else wc
-    sun_open_after_prev = _next_weekday_time(prev_close + timedelta(minutes=1),
-                                             *p["weekly_open"])
+    sun_open_after_prev = _profile_weekday_time(prev_close + timedelta(minutes=1),
+                                                profile_key, "weekly_open")
     in_weekend = prev_close <= now < sun_open_after_prev
     remaining = (wc - now).total_seconds() / 60 if not in_weekend else 0
     is_friday = now.weekday() == 4
@@ -175,11 +237,11 @@ def get_session(profile_key, now=None, min_remaining_min=90, friday_cutoff_min=2
         return d
 
     if in_weekend or remaining < min_remaining_min or (is_friday and remaining < friday_cutoff_min):
-        # NEXT full session: Sunday open -> Monday close (futures: 21:00 UTC
-        # Monday; FX: Monday 21:00 UTC NY close)
-        start = wo if wo > now else _next_weekday_time(now, *p["weekly_open"])
+        # NEXT full session: Sunday open -> the venue's daily close on the Monday after it
+        # (CME 16:00 CT / FX 17:00 ET — DST-correct via _local_close_on).
+        start = wo if wo > now else _profile_weekday_time(now, profile_key, "weekly_open")
         start = _skip_holidays(start)
-        end = start.replace(hour=21, minute=0) + timedelta(days=1)
+        end = _local_close_on(profile_key, (start + timedelta(days=1)).date(), "weekly_close")
         out["market_state"] = "closed_weekend" if in_weekend else "open_closing_soon"
         out["window_label"] = "next session (Sun reopen -> Mon close)"
     else:
@@ -189,11 +251,16 @@ def get_session(profile_key, now=None, min_remaining_min=90, friday_cutoff_min=2
 
     nb = "none before window end"
     if p.get("daily_break") and end.weekday() in (0, 1, 2, 3):
-        b0 = end.replace(hour=int(p["daily_break"][0][:2]), minute=int(p["daily_break"][0][3:5]))
-        if start < b0 < end:
-            nb = f"{_fmt(b0)} -> {p['daily_break'][1]} UTC daily maintenance"
+        if _TZ_OK and p.get("daily_break_local") and p.get("tz"):
+            b0 = _local_to_utc(end.date(), p["daily_break_local"][0], p["tz"])
+            brk = f"{p['daily_break_local'][0]}-{p['daily_break_local'][1]} CT"
         else:
-            nb = f"next daily break {_fmt(b0)} UTC (at/after window end)"
+            b0 = end.replace(hour=int(p["daily_break"][0][:2]), minute=int(p["daily_break"][0][3:5]))
+            brk = f"{p['daily_break'][0]}-{p['daily_break'][1]} UTC"
+        if start < b0 < end:
+            nb = f"{_fmt(b0)} UTC daily maintenance ({brk})"
+        else:
+            nb = f"next daily break {_fmt(b0)} UTC ({brk}, at/after window end)"
     out.update({
         "market_open_utc": _fmt(wo - timedelta(days=7)) if not in_weekend and wo - timedelta(days=7) <= now else _fmt(wo),
         "market_close_utc": _fmt(wc),

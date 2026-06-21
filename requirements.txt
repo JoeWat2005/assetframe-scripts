@@ -1,6 +1,11 @@
 fpdf2>=2.8
 pymupdf>=1.26
 
+# IANA time-zone database for zoneinfo. The OCI Linux box ships a system tz database, but
+# pinning the pure-data tzdata package guarantees sessions.py can compute DST-correct exchange
+# session boundaries on any host (incl. bare Windows dev boxes) and keeps the tz data updatable.
+tzdata>=2024.1
+
 # Postgres client (psycopg3) for the OCI engine runner — scripts/engine_ops.py,
 # poller.py, scheduled_run.py poll/write the Neon coordination tables (generation_requests,
 # engine_runs, engine_state). The [binary] extra ships a prebuilt libpq so no system pq-dev

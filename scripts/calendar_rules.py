@@ -8,12 +8,16 @@ the intraday freshness block are the backstops if a holiday is missing from the 
 Lightweight + dependency-free (no exchange_calendars). The interface (`is_due`,
 `is_trading_day`) is stable so a heavier calendar library can be swapped in later.
 
-Holiday table: config/holidays.json = {"US": ["2026-01-01", ...], "UK": [...]}.
-Asset -> calendar key by timezone (America/* -> US, Europe/London -> UK). FX and
-crypto use no exchange-holiday calendar (FX trades through most; crypto is 24/7).
+Holidays are COMPUTED for any year (`computed_holidays`) from the standard market-holiday
+rules — fixed dates, nth-weekday rules, Good Friday/Easter (computus), and the NYSE/LSE
+weekend-observance rules — so the calendar never needs a hand-maintained table and stays
+correct forever. config/holidays.json remains an OPTIONAL supplement/override for one-off
+closures (e.g. an unscheduled exchange closure). Asset -> calendar key by timezone
+(America/* -> US, Europe/London -> UK). FX and crypto use no exchange-holiday calendar
+(FX trades through most; crypto is 24/7).
 """
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 DEFAULT_HOLIDAYS = Path("config/holidays.json")
@@ -31,6 +35,100 @@ def load_holidays(path=DEFAULT_HOLIDAYS):
     except Exception:
         return {}
     return {k: set(v) for k, v in data.items() if isinstance(v, list)}
+
+
+# --- computed market holidays (US NYSE/CME, UK LSE) — generated for ANY year, so the holiday
+# calendar never needs hand-maintaining and never silently lapses. ---------------------------
+
+def _easter(year):
+    """Gregorian Easter Sunday (Anonymous Gregorian / Meeus algorithm)."""
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    ll = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * ll) // 451
+    month = (h + ll - 7 * m + 114) // 31
+    day = ((h + ll - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def _nth_weekday(year, month, weekday, n):
+    """The n-th `weekday` (Mon=0 .. Sun=6) of month (n >= 1)."""
+    first = date(year, month, 1)
+    return first + timedelta(days=(weekday - first.weekday()) % 7 + 7 * (n - 1))
+
+
+def _last_weekday(year, month, weekday):
+    nxt = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    last = nxt - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
+
+
+def _us_observed(d):
+    """NYSE/CME observance: a holiday on Saturday is observed the preceding Friday; on Sunday,
+    the following Monday."""
+    if d.weekday() == 5:
+        return d - timedelta(days=1)
+    if d.weekday() == 6:
+        return d + timedelta(days=1)
+    return d
+
+
+def _uk_substitute(d):
+    """UK bank-holiday substitute day: a weekend holiday rolls to the next weekday."""
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d
+
+
+_HOLIDAY_CACHE = {}
+
+
+def computed_holidays(key, year):
+    """Set of ISO date strings of full-day market closures for calendar `key` ('US' | 'UK')
+    in `year`, generated from the standard rules. Half-days (early closes) are NOT included —
+    those sessions still open. Cached per (key, year)."""
+    ck = (key, year)
+    if ck in _HOLIDAY_CACHE:
+        return _HOLIDAY_CACHE[ck]
+    easter = _easter(year)
+    out = set()
+    if key == "US":
+        days = [date(year, 1, 1),                       # New Year's Day
+                _nth_weekday(year, 1, 0, 3),            # MLK Day (3rd Mon Jan)
+                _nth_weekday(year, 2, 0, 3),            # Washington's Birthday (3rd Mon Feb)
+                easter - timedelta(days=2),            # Good Friday
+                _last_weekday(year, 5, 0),             # Memorial Day (last Mon May)
+                date(year, 7, 4),                      # Independence Day
+                _nth_weekday(year, 9, 0, 1),           # Labor Day (1st Mon Sep)
+                _nth_weekday(year, 11, 3, 4),          # Thanksgiving (4th Thu Nov)
+                date(year, 12, 25)]                    # Christmas
+        if year >= 2022:
+            days.append(date(year, 6, 19))             # Juneteenth (NYSE observed from 2022)
+        for h in days:
+            # New Year's Day falling on a Saturday is NOT observed (no preceding-Friday close).
+            if h.month == 1 and h.day == 1 and h.weekday() == 5:
+                continue
+            out.add(_us_observed(h).isoformat())
+    elif key == "UK":
+        xmas = _uk_substitute(date(year, 12, 25))
+        boxing = _uk_substitute(date(year, 12, 26))
+        if boxing == xmas:                              # collision (e.g. 25th Sat, 26th Sun)
+            boxing = _uk_substitute(xmas + timedelta(days=1))
+        days = [_uk_substitute(date(year, 1, 1)),       # New Year's Day
+                easter - timedelta(days=2),            # Good Friday
+                easter + timedelta(days=1),            # Easter Monday
+                _nth_weekday(year, 5, 0, 1),           # Early May Bank Holiday (1st Mon)
+                _last_weekday(year, 5, 0),             # Spring Bank Holiday (last Mon May)
+                _last_weekday(year, 8, 0),             # Summer Bank Holiday (last Mon Aug)
+                xmas, boxing]
+        out = {h.isoformat() for h in days}
+    _HOLIDAY_CACHE[ck] = out
+    return out
 
 
 def _calendar_key(asset):
@@ -72,8 +170,12 @@ def is_holiday(asset, d, holidays=None):
     key = _calendar_key(asset)
     if not key:
         return False
+    iso = d.isoformat()
+    if iso in computed_holidays(key, d.year):          # the standing, always-current calendar
+        return True
+    # config/holidays.json is an OPTIONAL supplement/override for one-off closures.
     holidays = holidays if holidays is not None else load_holidays()
-    return d.isoformat() in holidays.get(key, set())
+    return iso in holidays.get(key, set())
 
 
 def is_trading_day(asset, d, holidays=None):

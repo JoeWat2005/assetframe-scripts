@@ -12,26 +12,24 @@ from config_loader import load_assets, ConfigError, DEFAULT_CONFIG
 
 
 def _holiday_warnings(assets):
-    """Warn (not fail) if the holiday table doesn't cover the current + next calendar year for
-    a calendar that an enabled asset actually uses. A missing year silently disables skips."""
+    """Holidays are COMPUTED for any year (calendar_rules.computed_holidays), so the calendar
+    never lapses and needs no annual maintenance. This is just a sanity check that the
+    computation is producing dates for the calendars enabled assets actually use."""
     try:
         import calendar_rules as CR
     except Exception:
         return
-    cov = CR.holiday_coverage()
     needed = set()
     for a in assets:
-        if a.get("enabled", True):
-            key = CR._TZ_CALENDAR.get(a.get("timezone")) if a.get("asset_class") not in ("fx", "crypto") else None
+        if a.get("enabled", True) and a.get("asset_class") not in ("fx", "crypto"):
+            key = CR._TZ_CALENDAR.get(a.get("timezone"))
             if key:
                 needed.add(key)
     this_year = datetime.now(timezone.utc).year
     for key in sorted(needed):
-        rng = cov.get(key)
-        if not rng or rng[1] < this_year + 1 or rng[0] > this_year:
-            have = f"{rng[0]}-{rng[1]}" if rng else "none"
-            print(f"WARNING: holiday table for '{key}' covers {have}; "
-                  f"add {this_year}-{this_year + 1} to config/holidays.json", file=sys.stderr)
+        if not CR.computed_holidays(key, this_year):
+            print(f"WARNING: computed holiday set for '{key}' {this_year} is empty "
+                  f"(unexpected — check calendar_rules.computed_holidays)", file=sys.stderr)
 
 
 def main():
