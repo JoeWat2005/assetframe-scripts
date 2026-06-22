@@ -742,8 +742,11 @@ def main():
             die("--window-end must be after the window start / as-of moment")
         session["window_end_utc"] = we[:16]
         session["window_label"] = "explicit window (as-of / retroactive run)"
-    # a window per configured timeframe (track 0 = the primary/published window above)
-    track_specs = [{"forecast_window": primary_fw, "horizon": (brief.get("horizon") or "next_session"),
+    # a window per configured timeframe (track 0 = the primary/published window above). The horizon
+    # follows the WINDOW (forecast_window) -- NOT the brief's label -- so the primary's ledger row and
+    # its applied calibration land in the same bucket the extra tracks use.
+    primary_horizon = _horizon_for(primary_fw)
+    track_specs = [{"forecast_window": primary_fw, "horizon": primary_horizon,
                     "window_start_utc": session["window_start_utc"],
                     "window_end_utc": session["window_end_utc"]}]
     for tf in timeframes[1:]:
@@ -779,7 +782,7 @@ def main():
     conf = conf_engine.compute_confidence(analysis, primary, brief, research, social,
                                           ledger_ctx, calib,
                                           options_included=brief.get("options_context_included", False),
-                                          levels=[l["value"] for l in levels])
+                                          levels=[l["value"] for l in levels], horizon=primary_horizon)
 
     payload = assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
                        setups, ladder, ledger_levels, conf, asset_class, regime, pred_type,
@@ -794,7 +797,7 @@ def main():
         "view": payload["meta"]["research_view"], "confidence": conf["published"],
         "conf_version": conf["conf_version"], "conf_raw": conf["capped"],
         "taxonomy": taxonomy.build_taxonomy(pred_type, direction,
-                                            brief.get("horizon", "next_session"), asset_class, regime),
+                                            primary_horizon, asset_class, regime),
         "window_start_utc": session["window_start_utc"], "window_end_utc": session["window_end_utc"],
         "hourly_csv": hourly_csv, "predictions": preds,
         "setup": {k: primary.get(k) for k in ("direction", "entry_lo", "entry_hi", "invalidation", "t1")}

@@ -406,7 +406,8 @@ def generate_asset(asset, now, no_render, as_of=None):
     if _td_sym:                                   # explicit TD symbol (e.g. gold XAU/USD spot)
         icmd += ["--td-symbol", _td_sym]
     if asset.get("include_fundamentals"):         # equity fundamentals (narrative-only; TD)
-        icmd += ["--fundamentals", "1"]
+        icmd += ["--fundamentals", "1",
+                 "--fundamentals-source", asset.get("fundamentals_source") or "auto"]
     if asset.get("related"):
         icmd += ["--related", asset["related"]]
     if backdated:
@@ -613,11 +614,16 @@ def main():
                 try:
                     r = float(rate); iv = (60.0 / r) if r > 0 else 0.0
                 except ValueError:
+                    print(f"  WARNING: TWELVEDATA_RATE_PER_MIN={rate!r} is not a number "
+                          f"(expected e.g. 55) -- falling back to TWELVEDATA_MIN_INTERVAL_S pacing")
                     iv = None
             if iv is None:
+                _mi = os.environ.get("TWELVEDATA_MIN_INTERVAL_S", "8") or "0"
                 try:
-                    iv = float(os.environ.get("TWELVEDATA_MIN_INTERVAL_S", "8") or 0)
+                    iv = float(_mi)
                 except ValueError:
+                    print(f"  WARNING: TWELVEDATA_MIN_INTERVAL_S={_mi!r} is not a number -- "
+                          f"using the safe 8s default (workers will serialize)")
                     iv = 8.0
             if iv >= 2.0:   # <=30 req/min: serialize so the per-process throttle holds across assets
                 print(f"  twelvedata low-rate tier: clamping workers {o['workers']} -> 1 "

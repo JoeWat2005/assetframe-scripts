@@ -5,7 +5,7 @@ Usage:
          [--hrange 10d] [--drange 1y] [--roll-utc 22] [--related "SYM1,SYM2,SYM3"]
          [--provider yahoo|eodhd|twelvedata] [--anchor live|prior-completed|friday]
          [--as-of "YYYY-MM-DD HH:MM"] [--session-profile fx_spot|us_equity_rth|...]
-         [--td-symbol XAU/USD] [--fundamentals 1]
+         [--td-symbol XAU/USD] [--fundamentals 1] [--fundamentals-source auto|twelvedata|none]
 
 --as-of TRIMS every fetched series (hourly/daily/related) to bars at/<= that UTC
 moment BEFORE any indicator/pivot/session/freshness computation or CSV write, so the
@@ -1062,8 +1062,14 @@ def main():
     # Optional equity fundamentals (Twelve Data). Best-effort + NARRATIVE-ONLY (never scored).
     # Skipped for backdated (--as-of) runs: a current snapshot would be anachronistic / look-ahead.
     fundamentals = None
-    if (args.get("--fundamentals") in ("1", "true", "on", "yes")
-            and (provider or PROVIDER_DEFAULT) == "twelvedata" and cutoff_ts is None):
+    # Per-asset source override (synced from Neon engine_assets.fundamentals_source):
+    #   none       -> never fetch, even when --fundamentals is on;
+    #   twelvedata -> fetch via TD regardless of the global ADVISOR_DATA_PROVIDER;
+    #   auto/unset -> fetch only when the global provider is already twelvedata.
+    _fsrc = (args.get("--fundamentals-source") or "auto").strip().lower()
+    _td_active = (provider or PROVIDER_DEFAULT) == "twelvedata"
+    if (args.get("--fundamentals") in ("1", "true", "on", "yes") and _fsrc != "none"
+            and (_fsrc == "twelvedata" or _td_active) and cutoff_ts is None):
         fkey = os.environ.get("TWELVEDATA_API_KEY")
         if fkey:
             try:

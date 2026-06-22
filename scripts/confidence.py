@@ -413,7 +413,7 @@ def _apply_calibration(score, calib, horizon=None):
 
 def compute_confidence(analysis, setup, brief=None, research_pack=None,
                        social_pack=None, ledger_context=None, calib=None,
-                       options_included=False, levels=None):
+                       options_included=False, levels=None, horizon=None):
     # Canonicalize with the SAME default scaffold stamps onto the ledger row, so the ledger
     # lookups (ledger_confidence / _ledger_failure) match the stored pred_type instead of None.
     pred_type = validate_prediction_type(((brief or {}).get("primary_prediction") or {}).get("type", "range_hold"))
@@ -447,7 +447,9 @@ def compute_confidence(analysis, setup, brief=None, research_pack=None,
         cap = min(cap, 60); caps.append("in_window_event->60")
 
     capped = min(raw, cap)
-    horizon = ((brief or {}).get("horizon") or "next_session")
+    # caller (scaffold) passes the WINDOW-derived horizon so the applied calibration sub-map matches
+    # the ledger row's horizon bucket; fall back to the brief's label, then the default.
+    horizon = horizon or (brief or {}).get("horizon") or "next_session"
     published = int(round(_clamp(_apply_calibration(capped, calib, horizon), 0, 100)))
 
     components = [
