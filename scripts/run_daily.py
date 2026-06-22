@@ -251,6 +251,8 @@ def author_brief_step(asset, brief_path):
             cmd += ["--social", _rel(social)]
         if guidance:
             cmd += ["--guidance", guidance]
+        if not asset.get("include_news", True):   # per-asset technical-focus (no news research)
+            cmd += ["--no-news"]
         ok, rc, out, err = _run_rc(cmd, timeout=WRITER_TIMEOUT)
         res["token_cost"]["writer"].append(_parse_last_json(out) or {"error": (err or "")[-160:]})
         # exit 3 == ANTHROPIC_API_KEY unset / SDK missing / API error -> degrade gracefully

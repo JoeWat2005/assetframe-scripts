@@ -507,17 +507,33 @@ def _usage_line(model, usage_in, usage_out, web_searches, attempts):
             f"est_cost_usd=${cost:.4f}")
 
 
+NEWS_OFF_DIRECTIVE = (
+    "\n\nINSTRUMENT MODE: technical-focus (news disabled for this instrument). Keep catalyst/news "
+    "research minimal — only flag a major SCHEDULED event if it falls inside the prediction window; "
+    "do NOT pad the brief with general headlines. Base the thesis on the technical + ledger evidence.")
+
+
+def _news_settings(include_news):
+    """Per-asset news toggle -> (web_search max_uses, system-prompt suffix). News-on keeps the full
+    research budget; news-off trims it and adds a technical-focus directive (no broken TD /news call:
+    TD news is a business-tier feature, so WebSearch remains the news source)."""
+    return (8, "") if include_news else (2, NEWS_OFF_DIRECTIVE)
+
+
 def author_brief(ticker, analysis, memory_pack, research, social, *, model,
-                 max_tokens, guidance=None):
+                 max_tokens, guidance=None, include_news=True):
     """Call the model (with web_search), parse + validate, RE-PROMPT ONCE on a
-    validation miss. Returns (brief, telemetry). Raises SystemExit on hard failure."""
+    validation miss. Returns (brief, telemetry). Raises SystemExit on hard failure.
+    include_news=False (per-asset) is technical-focus: a smaller web_search budget + a directive
+    to keep news/catalyst research minimal."""
     anthropic = _require_sdk()
     client = _client(anthropic)
 
-    system = SYSTEM_PROMPT
+    web_uses, sys_suffix = _news_settings(include_news)
+    system = SYSTEM_PROMPT + sys_suffix
     user = build_user_message(ticker, analysis, memory_pack, research, social, guidance)
     messages = [{"role": "user", "content": user}]
-    tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}]
+    tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": web_uses}]
 
     tot_in = tot_out = tot_web = 0
     last_err = None
@@ -610,6 +626,8 @@ def parse_args(argv):
                    help=f"max output tokens (default {DEFAULT_MAX_TOKENS})")
     p.add_argument("--guidance", default=None,
                    help="extra authoring guidance (e.g. a critic's issues for a revise loop)")
+    p.add_argument("--no-news", action="store_true", dest="no_news",
+                   help="technical-focus: minimal news/catalyst research (per-asset include_news=false)")
     return p.parse_args(argv)
 
 
@@ -623,7 +641,8 @@ def main(argv=None):
 
     brief, telemetry = author_brief(
         args.ticker, analysis, memory_pack, research, social,
-        model=args.model, max_tokens=args.max_tokens, guidance=args.guidance)
+        model=args.model, max_tokens=args.max_tokens, guidance=args.guidance,
+        include_news=not args.no_news)
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
