@@ -1108,6 +1108,7 @@ def build_pro(p, qa):
         if sent.get("note"):
             rp.render_section_html(pdf, str(sent["note"]), bullet_color=ACCENT)
         pdf.ln(0.5)
+    _fundamentals_pdf(pdf, p.get("fundamentals"))   # Pro-only; canonical figures
     sc = pro.get("source_confidence")
     for s in pro.get("sections", []):
         if s["heading"].strip().lower().startswith("source audit"):
@@ -1303,6 +1304,104 @@ def _sentiment_html(sent):
     return h + "</section>"
 
 
+def _fundamentals_rows(fund):
+    """Shared extraction for the fundamentals renderers (HTML + PDF). Returns
+    (metric_rows[(label, value)], catalyst_lines[str], source_note) or (None, None, None)."""
+    if not fund:
+        return None, None, None
+
+    def _money(x):
+        try:
+            x = float(x)
+        except (TypeError, ValueError):
+            return str(x)
+        for unit, div in (("T", 1e12), ("B", 1e9), ("M", 1e6)):
+            if abs(x) >= div:
+                return f"{x / div:.2f}{unit}"
+        return f"{x:,.0f}"
+
+    def _pct(x):
+        try:
+            return f"{float(x) * 100:.1f}%"
+        except (TypeError, ValueError):
+            return str(x)
+
+    def _ratio(x):
+        try:
+            return f"{float(x):.1f}"
+        except (TypeError, ValueError):
+            return str(x)
+
+    rows = []
+    val = fund.get("valuation") or {}
+    for key, lab, fmt in (("market_capitalization", "Market cap", _money),
+                          ("trailing_pe", "P/E (ttm)", _ratio), ("forward_pe", "P/E (fwd)", _ratio),
+                          ("peg_ratio", "PEG", _ratio), ("price_to_sales_ttm", "P/S", _ratio)):
+        if val.get(key) is not None:
+            rows.append((lab, fmt(val[key])))
+    marg = fund.get("margins") or {}
+    for key, lab in (("gross_margin", "Gross margin"), ("operating_margin", "Operating margin"),
+                     ("profit_margin", "Net margin"), ("return_on_equity_ttm", "ROE")):
+        if marg.get(key) is not None:
+            rows.append((lab, _pct(marg[key])))
+
+    cat = []
+    le = fund.get("latest_earnings") or {}
+    if le.get("date"):
+        s = f"Latest earnings {le['date']}"
+        if le.get("eps_actual") is not None:
+            s += f" - EPS {le['eps_actual']}"
+            if le.get("eps_estimate") is not None:
+                s += f" vs est {le['eps_estimate']}"
+        if le.get("surprise_prc") is not None:
+            try:
+                s += f" ({float(le['surprise_prc']):+.1f}% surprise)"
+            except (TypeError, ValueError):
+                pass
+        cat.append(s)
+
+    if not rows and not cat:
+        return None, None, None
+    prof = fund.get("profile") or {}
+    sub = " / ".join(x for x in (prof.get("sector"), prof.get("industry")) if x)
+    src = "Source: Twelve Data fundamentals"
+    if sub:
+        src += f" - {sub}"
+    if fund.get("fetched_utc"):
+        src += f" - as of {fund['fetched_utc']} UTC"
+    return rows, cat, src
+
+
+def _fundamentals_html(fund):
+    """Pro 'Fundamentals & Catalysts' HTML section from the canonical block (figures can never
+    disagree with the body). Pro-only; '' if absent."""
+    rows, cat, src = _fundamentals_rows(fund)
+    if rows is None:
+        return ""
+    e = lambda s: str(s).replace("&", "&amp;").replace("<", "&lt;")
+    body = _cards_html([(l, v) for l, v in rows]) if rows else ""
+    if cat:
+        body += "<ul>" + "".join(f"<li>{e(c)}</li>" for c in cat) + "</ul>"
+    body += f'<div class="muted">{e(src)}</div>'
+    return f'<section><h2>Fundamentals &amp; Catalysts</h2>{body}</section>'
+
+
+def _fundamentals_pdf(pdf, fund):
+    """Pro 'Fundamentals & Catalysts' PDF block (canonical figures), mirroring _fundamentals_html."""
+    rows, cat, src = _fundamentals_rows(fund)
+    if rows is None:
+        return
+    section_heading(pdf, "Fundamentals & Catalysts")
+    if rows:
+        kv_card(pdf, "Key metrics", rows)
+    parts = []
+    if cat:
+        parts.append("<ul>" + "".join(f"<li>{c}</li>" for c in cat) + "</ul>")
+    parts.append(src)
+    rp.render_section_html(pdf, " ".join(parts), bullet_color=ACCENT)
+    pdf.ln(0.5)
+
+
 def build_pro_html(p, qa):
     pro = p["pro"]
     e = lambda s: str(s).replace("&", "&amp;").replace("<", "&lt;")
@@ -1334,6 +1433,7 @@ def build_pro_html(p, qa):
     sent = pro.get("sentiment")
     if sent:
         h += _sentiment_html(sent)
+    h += _fundamentals_html(p.get("fundamentals"))   # Pro-only; canonical figures
     sc = pro.get("source_confidence")
     for s in pro.get("sections", []):
         if s["heading"].strip().lower().startswith("source audit"):
@@ -1356,6 +1456,7 @@ def build_metadata(p, qa, free_warn, pro_warn, qa_warns=None):
     meta["sentiment_block_included"] = bool(p["pro"].get("sentiment"))
     meta["chart_glossary_included"] = bool(_glossary_rows(p))
     meta["catalyst_status"] = p["pro"].get("catalyst_status")
+    meta["fundamentals_included"] = bool(p.get("fundamentals"))
     meta.setdefault("optional_chart", {
         "included": len(p["pro"].get("charts", [])) > 2,
         "reason": "default visual set sufficient - no optional chart added"})

@@ -749,6 +749,8 @@ def main():
                        setups, ladder, ledger_levels, conf, asset_class, regime, pred_type,
                        as_of_dt=now_dt)
     payload["timeframes"] = track_specs   # multi-timeframe outlook (one report, N horizon tracks)
+    if analysis.get("fundamentals"):      # canonical equity fundamentals (Pro render; never scored)
+        payload["fundamentals"] = analysis["fundamentals"]
 
     predictions = {
         "report_id": payload["report_id"], "instrument": payload["meta"]["instrument"],
