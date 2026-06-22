@@ -13,6 +13,7 @@ ledger/sim/
 ledger/calibration_map.json
 ledger/research_memory.json
 ledger/outcome_ledger.sqlite
+ledger/backups/
 
 # Secrets — never commit (the template IS committed)
 .env

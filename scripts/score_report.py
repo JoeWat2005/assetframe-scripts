@@ -224,6 +224,24 @@ def calibration(rows):
     return {"n_reports": len(rows), "buckets": out}
 
 
+def _backup_ledger(keep=5):
+    """Snapshot the append-only ledger before a write — zero-risk (append-only is never invalidated)
+    insurance against an accidental delete/corruption. Keeps the most recent `keep` snapshots under
+    ledger/backups/ (gitignored). Best-effort: a backup failure never blocks scoring."""
+    if not LEDGER.exists():
+        return
+    try:
+        import shutil
+        bdir = LEDGER.parent / "backups"
+        bdir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        shutil.copy2(LEDGER, bdir / f"outcome_ledger.{stamp}.csv")
+        for old in sorted(bdir.glob("outcome_ledger.*.csv"))[:-keep]:
+            old.unlink()
+    except Exception:
+        pass
+
+
 def main():
     if len(sys.argv) < 2:
         print("usage: python scripts/score_report.py <predictions.json> [--hourly csv] "
@@ -299,6 +317,7 @@ def main():
 
     if not opts["dry_run"] and not duplicate and not open_preview:
         LEDGER.parent.mkdir(parents=True, exist_ok=True)
+        _backup_ledger()   # snapshot the append-only source of truth before mutating it
         new_file = not LEDGER.exists()
         with open(LEDGER, "a", newline="", encoding="utf-8") as f:
             w = csv.writer(f)

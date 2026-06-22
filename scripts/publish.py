@@ -117,14 +117,24 @@ def main():
             vanished.append(key)
             print(f"skipped   {key} (file no longer present)")
             continue
-        try:
-            client.put_object(Bucket=env["R2_BUCKET"], Key=key,
-                              Body=path.read_bytes(), ContentType=ctype)
+        body = path.read_bytes()
+        err = None
+        for attempt in range(3):          # 3 attempts (2s, 4s) on top of boto3's own retries
+            try:
+                client.put_object(Bucket=env["R2_BUCKET"], Key=key, Body=body, ContentType=ctype)
+                err = None
+                break
+            except Exception as ex:
+                err = ex
+                if attempt < 2:
+                    import time as _t
+                    _t.sleep(2 * (attempt + 1))
+        if err is None:
             uploaded += 1
             print(f"uploaded  {key}")
-        except Exception as ex:
+        else:
             failed.append(key)
-            print(f"FAILED    {key}: {str(ex)[:140]}", file=sys.stderr)
+            print(f"FAILED    {key} (after retries): {str(err)[:140]}", file=sys.stderr)
     summary = f"Done - {uploaded} uploaded"
     if vanished:
         summary += f", {len(vanished)} vanished"
