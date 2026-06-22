@@ -780,14 +780,16 @@ def _cmd_pull_latest(conn, args):
     logs = []
     try:
         with _FileLock(LOCK_PATH, blocking=False):
-            # Discard the box's local sync_assets edits to the git-tracked config/assets.json so the
-            # ff-only pull can't fail on a dirty tree. Best-effort (no-op if clean/untracked); the
-            # poller re-syncs config from Neon on restart, so nothing is lost.
-            try:
-                subprocess.run(["git", "checkout", "--", "config/assets.json"], cwd=str(ROOT),
-                               capture_output=True, text=True, timeout=60)
-            except Exception:
-                pass
+            # Discard the box's local edits to git-tracked working files so the ff-only pull can't
+            # fail on a dirty tree. config/assets.json is re-synced from Neon on restart; the ledger
+            # is normally UNTRACKED (gitignored), so its checkout is a harmless no-op — it only bites
+            # for the single historical deploy that crossed the ledger-untrack commit. Best-effort.
+            for _path in ("config/assets.json", "ledger/outcome_ledger.csv"):
+                try:
+                    subprocess.run(["git", "checkout", "--", _path], cwd=str(ROOT),
+                                   capture_output=True, text=True, timeout=60)
+                except Exception:
+                    pass
             for cmd in steps:
                 try:
                     p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=600)
