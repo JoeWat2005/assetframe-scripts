@@ -383,12 +383,19 @@ def _is_valid_calib_map(calib):
     return True
 
 
-def _apply_calibration(score, calib):
-    """Piecewise-linear interpolation through the isotonic knots written by
-    calibrate.py. No / invalid map -> identity (fail safe)."""
-    if not _is_valid_calib_map(calib):
+def _apply_calibration(score, calib, horizon=None):
+    """Piecewise-linear interpolation through the isotonic knots written by calibrate.py. When
+    `horizon` is given and the map carries a valid by_horizon[horizon] sub-map, that horizon-specific
+    map is used (multi-timeframe reports calibrate each horizon on its own rows); otherwise the
+    global map; an invalid / absent map -> identity (fail safe)."""
+    chosen = calib
+    if isinstance(calib, dict) and horizon and isinstance(calib.get("by_horizon"), dict):
+        cand = calib["by_horizon"].get(horizon)
+        if _is_valid_calib_map(cand):
+            chosen = cand
+    if not _is_valid_calib_map(chosen):
         return score
-    knots = calib.get("knots") or []
+    knots = chosen.get("knots") or []
     xs = [k[0] for k in knots]
     ys = [k[1] for k in knots]
     if score <= xs[0]:
@@ -440,7 +447,8 @@ def compute_confidence(analysis, setup, brief=None, research_pack=None,
         cap = min(cap, 60); caps.append("in_window_event->60")
 
     capped = min(raw, cap)
-    published = int(round(_clamp(_apply_calibration(capped, calib), 0, 100)))
+    horizon = ((brief or {}).get("horizon") or "next_session")
+    published = int(round(_clamp(_apply_calibration(capped, calib, horizon), 0, 100)))
 
     components = [
         {"name": "Market", "weight": WEIGHTS["market"], "score": round(m, 3), "detail": m_sub},
@@ -453,7 +461,7 @@ def compute_confidence(analysis, setup, brief=None, research_pack=None,
         "social_adj": round(s_adj, 1), "raw": round(raw, 1), "capped": round(capped, 1),
         "published": published, "band": confidence_band(published),
         "caps_applied": caps, "components": components,
-        "calibrated": bool(calib), "conf_version": CONF_VERSION,
+        "calibrated": bool(calib), "calib_horizon": horizon, "conf_version": CONF_VERSION,
     }
 
 

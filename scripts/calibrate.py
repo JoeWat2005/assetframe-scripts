@@ -42,7 +42,7 @@ def _clamp(x, lo=0.0, hi=100.0):
 
 
 def load_points(ledger_path, conf_version):
-    """Return [(raw_score, realised_rate_0_1, weight_n), ...] for usable rows."""
+    """Return [(raw_score, realised_rate_0_1, weight_n, horizon), ...] for usable rows."""
     pts = []
     if not Path(ledger_path).exists():
         return pts
@@ -64,7 +64,7 @@ def load_points(ledger_path, conf_version):
             n = hits + misses
             if n <= 0:
                 continue
-            pts.append((x, hits / n, n))
+            pts.append((x, hits / n, n, (r.get("horizon") or "").strip()))
     return pts
 
 
@@ -131,6 +131,29 @@ def build_map(points, n_full=N_FULL, min_rows=MIN_ROWS):
             "knots": dedup}
 
 
+def _project(points):
+    """Drop the trailing horizon tag so the (x, y, w) fitters can consume the points."""
+    return [(p[0], p[1], p[2]) for p in points]
+
+
+def build_calibration(points, n_full=N_FULL, min_rows=MIN_ROWS):
+    """A GLOBAL map plus per-HORIZON sub-maps. Multi-timeframe reports register a prediction per
+    horizon (intraday / next_session / multi_session) and accuracy is horizon-dependent, so each
+    horizon is calibrated on its OWN rows; a horizon with < min_rows is omitted, so confidence
+    falls back to the global map for it. Backward-compatible: the global map stays at the top level
+    (knots etc.), so existing readers are unaffected; by_horizon is purely additive."""
+    out = dict(build_map(_project(points), n_full, min_rows))
+    out["version"] = 2
+    by_h = {}
+    for h in sorted({p[3] for p in points if len(p) > 3 and p[3]}):
+        hp = [p for p in points if len(p) > 3 and p[3] == h]
+        if len(hp) >= min_rows:
+            by_h[h] = build_map(_project(hp), n_full, min_rows)
+    if by_h:
+        out["by_horizon"] = by_h
+    return out
+
+
 def parse_args(argv):
     opts = {"ledger": DEFAULT_LEDGER, "out": DEFAULT_OUT, "conf_version": CONF_VERSION,
             "n_full": N_FULL, "min_rows": MIN_ROWS, "dry_run": False}
@@ -158,7 +181,7 @@ def parse_args(argv):
 def main():
     opts = parse_args(sys.argv[1:])
     points = load_points(opts["ledger"], opts["conf_version"])
-    cmap = build_map(points, opts["n_full"], opts["min_rows"])
+    cmap = build_calibration(points, opts["n_full"], opts["min_rows"])
     print(json.dumps(cmap, indent=1))
     if not opts["dry_run"]:
         opts["out"].parent.mkdir(parents=True, exist_ok=True)

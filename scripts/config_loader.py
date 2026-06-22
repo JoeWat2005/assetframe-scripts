@@ -21,6 +21,11 @@ Schema (per asset):
   roll_utc          int 0..23 (intraday --roll-utc)         (default 0)
   related           str comma list for intraday --related   (default "")
   forecast_window   FORECAST_WINDOWS                        (default "next_session")
+  timeframes        list[FORECAST_WINDOWS], one prediction   (optional; default [forecast_window])
+                    track per entry — the multi-timeframe set
+  include_fundamentals bool                                  (optional; default: equities only)
+  include_news      bool                                    (optional; default true)
+  fundamentals_source  auto | twelvedata | none             (optional; default "auto")
   publish_policy    PUBLISH_POLICIES                        (default "approval_required")
   report_tier       REPORT_TIERS                            (default "official")
   enabled           bool                                    (default true)
@@ -111,6 +116,23 @@ def _validate_one(a, idx, seen_ids):
     fw = a.get("forecast_window")
     if fw and fw not in FORECAST_WINDOWS:
         errs.append(f"{where}: forecast_window '{fw}' not in {list(FORECAST_WINDOWS)}")
+    tfs = a.get("timeframes")
+    if tfs is not None:
+        if not isinstance(tfs, list) or not tfs:
+            errs.append(f"{where}: timeframes must be a non-empty list of forecast windows")
+        else:
+            for tf in tfs:
+                if tf not in FORECAST_WINDOWS:
+                    errs.append(f"{where}: timeframe '{tf}' not in {list(FORECAST_WINDOWS)}")
+            if len(set(tfs)) != len(tfs):
+                errs.append(f"{where}: timeframes has duplicate entries {tfs}")
+    for flag in ("include_fundamentals", "include_news"):
+        v = a.get(flag)
+        if v is not None and not isinstance(v, bool):
+            errs.append(f"{where}: {flag} must be a boolean")
+    fsrc = a.get("fundamentals_source")
+    if fsrc is not None and fsrc not in ("auto", "twelvedata", "none"):
+        errs.append(f"{where}: fundamentals_source '{fsrc}' must be auto|twelvedata|none")
     ru = a.get("roll_utc", 0)
     if not isinstance(ru, int) or isinstance(ru, bool) or not (0 <= ru <= 23):
         errs.append(f"{where}: roll_utc must be an int 0..23")
@@ -137,6 +159,14 @@ def _normalize(a):
     a.setdefault("publish_policy", "approval_required")
     a.setdefault("report_tier", "official")
     a.setdefault("forecast_window", "next_session")
+    # multi-timeframe: one prediction track per entry. Default = the single forecast_window
+    # (backward-compatible — one track), so existing assets are unchanged.
+    tfs = a.get("timeframes") or [a["forecast_window"]]
+    seen = set()
+    a["timeframes"] = [t for t in tfs if not (t in seen or seen.add(t))]
+    a.setdefault("include_fundamentals", a.get("asset_class") == "equity")
+    a.setdefault("include_news", True)
+    a.setdefault("fundamentals_source", "auto")
     return a
 
 
