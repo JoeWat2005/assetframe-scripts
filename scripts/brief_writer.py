@@ -403,7 +403,11 @@ Prediction intent (NO prices anywhere):
      "invalidators"  non-empty array of described (not priced) invalidation conditions
   }},
   "alternative_prediction": {{ "type" one of the taxonomy, "reasoning" }},
-  "preferred_setup": {{ "side" one of {list(SETUP_SIDES)}, "why_this_setup", "avoid_if" }},
+  "preferred_setup": {{ "side" one of {list(SETUP_SIDES)}, "why_this_setup", "avoid_if",
+     OPTIONAL - hand-pick the trade levels instead of the engine default. Use CANONICAL level ids
+     ONLY (from the analysis: pp/r1/r2/r3/s1/s2/s3/inner_hi/inner_lo/outer_hi/outer_lo/swing_hi/
+     swing_lo/anchor): "entry_ids" [array], "invalidation_id", "t1_id", "t2_id". Non-canonical ids
+     are ignored (you cannot invent a price). Confidence stays engine-computed - never set it. }},
   "manual_prediction"  optional prose for a P6 manual check (no prices; the engine binds it)
 
 Narrative + context:

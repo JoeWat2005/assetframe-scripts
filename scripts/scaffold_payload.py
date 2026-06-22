@@ -239,6 +239,34 @@ def build_setups(by_id, levels):
     return setups
 
 
+def _apply_setup_override(primary, by_id, override):
+    """Analyst-selected setup: the brief's preferred_setup may name CANONICAL level ids for the
+    entry zone / invalidation / targets -- {'entry_ids': [...], 'invalidation_id': ..., 't1_id': ...,
+    't2_id': ...}. Returns a NEW setup using those canonical VALUES when at least one entry id and the
+    invalidation id are real canonical levels (no fabrication -- every price stays canonical, and the
+    QA gate re-checks it); otherwise `primary` unchanged. Direction is never changed here. This is
+    how the AI gets more control over the prediction WITHOUT breaking the no-fabrication guarantee or
+    touching the deterministic, calibrated confidence."""
+    if not primary or not isinstance(override, dict):
+        return primary
+    ent = [i for i in (override.get("entry_ids") or []) if i in by_id]
+    inv = override.get("invalidation_id")
+    if not ent or inv not in by_id:
+        return primary
+    s = dict(primary)
+    vals = [by_id[i]["value"] for i in ent]
+    s["entry_lo"], s["entry_hi"] = min(vals), max(vals)
+    s["invalidation"] = by_id[inv]["value"]
+    for key, idk in (("t1", "t1_id"), ("t2", "t2_id")):
+        if override.get(idk) in by_id:
+            s[key] = by_id[override[idk]]["value"]
+    trigger = s["entry_hi"] if s.get("direction") == "long" else s["entry_lo"]
+    s["rr"], _, _ = _fmt_rr(trigger, s["invalidation"], s.get("t1"), s.get("t2"))
+    s["name"] = (primary.get("name") or "Setup").split(" (")[0] + " (analyst-selected levels)"
+    s["analyst_selected"] = True
+    return s
+
+
 def build_ladder(levels, setups):
     """All level ids except the bare anchor (kept out so it renders as LAST),
     ensuring every setup inval/t1/t2 id is present."""
@@ -729,6 +757,14 @@ def main():
     levels, by_id = build_levels(analysis, last_price)
     direction = taxonomy.validate_direction(brief.get("directional_view", "neutral"))
     setups = build_setups(by_id, levels)
+    # analyst-selected setup levels (applied BEFORE the ladder/QA so the chosen canonical levels are
+    # included and re-validated). Falls back to the deterministic setup if the override is incomplete.
+    ovr = brief.get("preferred_setup") or {}
+    if setups and isinstance(ovr, dict) and (ovr.get("entry_ids") or ovr.get("invalidation_id")):
+        base = next((s for s in setups if s["direction"] == ovr.get("side")), setups[0])
+        new = _apply_setup_override(base, by_id, ovr)
+        if new is not base:
+            setups[setups.index(base)] = new
     ladder = build_ladder(levels, setups)
     preds, ledger_levels = build_predictions_spec(by_id, brief, direction)
 
