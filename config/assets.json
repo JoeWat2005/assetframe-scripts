@@ -50,9 +50,9 @@
       "report_tier": "official", "enabled": true
     },
     {
-      "id": "gold", "name": "Gold", "instrument": "Gold (COMEX front-month future)", "ticker": "GOLD",
-      "provider_symbols": {"yahoo": "GC=F"},
-      "asset_class": "commodity", "session_profile": "cme_futures", "cadence": "weekday_or_market_open",
+      "id": "gold", "name": "Gold", "instrument": "Gold (spot, XAU/USD)", "ticker": "GOLD",
+      "provider_symbols": {"yahoo": "GC=F", "twelvedata": "XAU/USD"},
+      "asset_class": "commodity", "session_profile": "fx_spot", "cadence": "weekday",
       "timezone": "America/New_York", "roll_utc": 22, "related": "DX-Y.NYB,SI=F",
       "forecast_window": "next_liquid_session", "publish_policy": "approval_required",
       "report_tier": "official", "enabled": true

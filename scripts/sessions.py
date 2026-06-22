@@ -291,6 +291,26 @@ def _add_trading_days(d, n, holiday_dates):
     return d
 
 
+def _next_daily_close(profile_key, start, min_remaining_min, holiday_dates):
+    """UTC instant of the next DAILY liquidity close at/after `start` (+ a min_remaining guard),
+    skipping weekends and holidays. Uses the profile's local close TIME (spot FX 17:00 ET, CME
+    futures 16:00 CT) applied to each candidate trading date, DST-correct via _local_close_on."""
+    zone = PROFILES[profile_key].get("tz")
+    if _TZ_OK and zone:
+        from zoneinfo import ZoneInfo
+        d = start.astimezone(ZoneInfo(zone)).date()
+    else:
+        d = start.date()
+    guard = timedelta(minutes=min_remaining_min)
+    for _ in range(14):                      # bounded scan; weekend/holiday runs are short
+        if d.weekday() < 5 and d not in holiday_dates:
+            cand = _local_close_on(profile_key, d, "weekly_close")
+            if cand > start + guard:
+                return cand
+        d += timedelta(days=1)
+    return start + timedelta(days=1)         # pathological fallback (never hit in practice)
+
+
 def get_window(profile_key, now=None, forecast_window=None, holiday_dates=None,
                min_remaining_min=90, friday_cutoff_min=240):
     """Resolve the prediction window for a given forecast horizon. Standard windows delegate
@@ -299,12 +319,28 @@ def get_window(profile_key, now=None, forecast_window=None, holiday_dates=None,
     base = get_session(profile_key, now=now, min_remaining_min=min_remaining_min,
                        friday_cutoff_min=friday_cutoff_min, holiday_dates=holiday_dates)
     fw = (forecast_window or "").strip().lower()
+    holiday_dates = holiday_dates or set()
+    ptype = PROFILES[profile_key]["type"]
+
+    # next_liquid_session on a 24/5 venue (spot FX, futures): get_session targets the WEEKLY close,
+    # so EVERY daily report in a week ends on the same Friday -> overlapping windows that count the
+    # same outcome multiple times in calibration. Re-target the end to the next DAILY liquidity
+    # close (FX 17:00 ET / futures 16:00 CT) so each day's report owns a distinct ~1-session,
+    # non-overlapping window. Equity (next_regular_session) and crypto (rolling_24h) already get a
+    # correct ~1-day window from get_session, so they fall through unchanged.
+    if fw == "next_liquid_session" and ptype in ("fx_24_5", "futures_23h"):
+        start = datetime.strptime(base["window_start_utc"], "%Y-%m-%d %H:%M").replace(tzinfo=UTC)
+        end = _next_daily_close(profile_key, start, min_remaining_min, holiday_dates)
+        out = dict(base)
+        out["window_end_utc"] = _fmt(end)
+        out["window_label"] = "next liquid session (to daily close)"
+        out["forecast_window"] = fw
+        return out
+
     if fw not in LONG_WINDOWS:
         return base
-    holiday_dates = holiday_dates or set()
     start = datetime.strptime(base["window_start_utc"], "%Y-%m-%d %H:%M").replace(tzinfo=UTC)
     end = datetime.strptime(base["window_end_utc"], "%Y-%m-%d %H:%M").replace(tzinfo=UTC)
-    ptype = PROFILES[profile_key]["type"]
     if ptype == "crypto_24_7":
         end = start + timedelta(days=7 if fw == "next_week" else 5)
     elif ptype == "equity_rth":
@@ -320,7 +356,10 @@ def get_window(profile_key, now=None, forecast_window=None, holiday_dates=None,
         else:
             close_date = _add_trading_days(start.date(), 4, holiday_dates)
             end = _local_close_on(profile_key, close_date, "weekly_close")
-    if end <= start:                      # never emit a degenerate window
+    if end <= start:                      # never emit a degenerate window — and surface it
+        import sys as _sys
+        print(f"WARNING: degenerate {fw} window for {profile_key} (end<=start); extended +1 day",
+              file=_sys.stderr)
         end = start + timedelta(days=1)
     out = dict(base)
     out["window_end_utc"] = _fmt(end)

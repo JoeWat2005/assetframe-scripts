@@ -398,7 +398,11 @@ def generate_asset(asset, now, no_render, as_of=None):
 
     # 1. data + analysis
     icmd = ["scripts/intraday.py", asset["provider_symbols"]["yahoo"], "--name", tk,
-            "--hrange", "10d", "--roll-utc", str(asset.get("roll_utc", 0))]
+            "--hrange", "10d", "--roll-utc", str(asset.get("roll_utc", 0)),
+            "--session-profile", asset["session_profile"]]
+    _td_sym = (asset.get("provider_symbols") or {}).get("twelvedata")
+    if _td_sym:                                   # explicit TD symbol (e.g. gold XAU/USD spot)
+        icmd += ["--td-symbol", _td_sym]
     if asset.get("related"):
         icmd += ["--related", asset["related"]]
     if backdated:
@@ -591,6 +595,27 @@ def main():
             print(f"    ! error {er.get('file')}: {er.get('error') or er.get('report_id')}")
 
     if o["mode"] in ("generate_only", "production"):
+        # Pace asset parallelism to the Twelve Data plan. The Basic free tier (8 req/min) needs
+        # assets serialized so intraday's per-process throttle holds across the whole run; Grow
+        # (55/min — set TWELVEDATA_RATE_PER_MIN=55) has ample headroom, so keep the configured
+        # workers. iv = min seconds between TD calls; clamp only when it implies a low (<=30/min) rate.
+        if os.environ.get("ADVISOR_DATA_PROVIDER") == "twelvedata" and o["workers"] > 1:
+            rate = os.environ.get("TWELVEDATA_RATE_PER_MIN")
+            iv = None
+            if rate not in (None, ""):
+                try:
+                    r = float(rate); iv = (60.0 / r) if r > 0 else 0.0
+                except ValueError:
+                    iv = None
+            if iv is None:
+                try:
+                    iv = float(os.environ.get("TWELVEDATA_MIN_INTERVAL_S", "8") or 0)
+                except ValueError:
+                    iv = 8.0
+            if iv >= 2.0:   # <=30 req/min: serialize so the per-process throttle holds across assets
+                print(f"  twelvedata low-rate tier: clamping workers {o['workers']} -> 1 "
+                      f"(set TWELVEDATA_RATE_PER_MIN to your plan's limit, e.g. 55 for Grow)")
+                o["workers"] = 1
         print(f"generating {len(due_assets)} due asset(s) with {o['workers']} worker(s)...")
         jobs = []
         with ThreadPoolExecutor(max_workers=max(1, o["workers"])) as pool:

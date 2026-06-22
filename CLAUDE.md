@@ -15,7 +15,7 @@ This project generates the AssetFrame report pair — **Snapshot** (free, 1 page
 ## Data sources (preference order)
 
 1. Official sources (exchange, regulator, central bank, company, government).
-2. Project engine `scripts/intraday.py` for OHLC, indicators, and levels (Yahoo by default; set `ADVISOR_DATA_PROVIDER=eodhd` + `EODHD_API_KEY` to cut over to the licensed feed — futures `=F` always come from Yahoo). Resilience chain for the essential daily series: configured provider → Yahoo (`query1`→`query2` host failover) → CoinGecko (crypto only, keyless, daily resampled). Always read the JSON's `freshness`, `degraded`, and `provider` blocks before using its numbers.
+2. Project engine `scripts/intraday.py` for OHLC, indicators, and levels (Yahoo by default; set `ADVISOR_DATA_PROVIDER=twelvedata` + `TWELVEDATA_API_KEY` — covers US equities/ETFs, forex incl. `XAU/USD` spot gold, and crypto — or `eodhd` + `EODHD_API_KEY` to cut over to a licensed feed; futures `=F` and indices `^` always come from Yahoo). Resilience chain for the essential daily series: configured provider → Yahoo (`query1`→`query2` host failover) → CoinGecko (crypto only, keyless, daily resampled). Always read the JSON's `freshness`, `degraded`, and `provider` blocks before using its numbers.
 3. Configured MCP servers if present (Alpha Vantage — budget the ~25 requests/day free tier; CoinGecko for crypto, keyless).
 4. Built-in WebSearch / WebFetch for news, macro, and catalysts.
 5. User-provided data.

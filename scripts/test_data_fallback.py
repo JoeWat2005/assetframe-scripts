@@ -11,10 +11,17 @@ Run:  python scripts/test_data_fallback.py
 import os
 import sys
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import intraday as I
+
+
+def setUpModule():
+    # Disable the Twelve Data rate throttle during tests so adapter tests don't sleep between calls;
+    # the throttle's own timing logic is covered with a mocked clock in TestTwelveDataThrottle.
+    os.environ["TWELVEDATA_MIN_INTERVAL_S"] = "0"
+    os.environ.pop("TWELVEDATA_RATE_PER_MIN", None)
 
 
 def _ms(y, m, d, h=0):
@@ -131,6 +138,227 @@ class TestFetchChartChain(unittest.TestCase):
         meta, rows = I.fetch_chart("GBPUSD=X", "1d", "1mo", provider="yahoo")
         self.assertEqual(meta["provider"], "yahoo")
         self.assertEqual(len(rows), 1)
+
+
+class TestTwelveDataMapping(unittest.TestCase):
+    def test_each_asset_class(self):
+        self.assertEqual(I.map_symbol_twelvedata("AAPL"), ("AAPL", "equity"))
+        self.assertEqual(I.map_symbol_twelvedata("BTC-USD"), ("BTC/USD", "crypto"))
+        self.assertEqual(I.map_symbol_twelvedata("GBPUSD=X"), ("GBP/USD", "forex"))
+        self.assertEqual(I.map_symbol_twelvedata("XAUUSD=X"), ("XAU/USD", "forex"))
+        self.assertEqual(I.map_symbol_twelvedata("JPY=X"), ("USD/JPY", "forex"))
+
+    def test_uncovered_left_to_yahoo(self):
+        # futures, indices, exchange-suffixed and already-slashed symbols return None -> served via Yahoo
+        for s in ("GC=F", "ES=F", "^VIX", "DX-Y.NYB", "BP.L", "XAU/USD", "BTC/USD"):
+            self.assertIsNone(I.map_symbol_twelvedata(s)[0], s)
+
+
+class TestTwelveDataChart(unittest.TestCase):
+    def _patch(self, payload):
+        self._orig = I._http_json
+        I._http_json = lambda *a, **k: payload
+
+    def tearDown(self):
+        if hasattr(self, "_orig"):
+            I._http_json = self._orig
+
+    def test_daily_equity_with_volume(self):
+        self._patch({"meta": {"exchange_timezone": "America/New_York", "type": "Common Stock"},
+                     "values": [{"datetime": "2026-06-17", "open": "300.85", "high": "302.07",
+                                 "low": "294.36", "close": "295.95", "volume": "42745100"},
+                                {"datetime": "2026-06-18", "open": "298.11", "high": "300.57",
+                                 "low": "295.62", "close": "298.01", "volume": "85962200"}],
+                     "status": "ok"})
+        meta, rows = I.twelvedata_chart("AAPL", "1d", "1mo", "k")
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(rows[0]["ts"] < rows[1]["ts"])           # ascending
+        self.assertEqual(rows[0]["c"], 295.95)                   # strings -> float
+        self.assertEqual(rows[1]["v"], 85962200.0)
+        self.assertEqual(meta["instrumentType"], "EQUITY")
+        self.assertEqual(meta["regularMarketPrice"], 298.01)
+
+    def test_forex_has_no_volume_and_maps_to_currency(self):
+        self._patch({"meta": {"type": "Physical Currency"},
+                     "values": [{"datetime": "2026-06-21", "open": "1.323", "high": "1.324",
+                                 "low": "1.317", "close": "1.320"}],
+                     "status": "ok"})
+        meta, rows = I.twelvedata_chart("GBPUSD=X", "1d", "1mo", "k")
+        self.assertEqual(rows[0]["v"], 0)                        # volume absent -> 0
+        self.assertEqual(meta["instrumentType"], "CURRENCY")
+
+    def test_precious_metal_is_currency_24_5(self):
+        self._patch({"meta": {"type": "Precious Metal"},
+                     "values": [{"datetime": "2026-06-22", "open": "4156", "high": "4216",
+                                 "low": "4135", "close": "4187"}], "status": "ok"})
+        meta, _ = I.twelvedata_chart("XAUUSD=X", "1d", "1mo", "k")
+        self.assertEqual(meta["instrumentType"], "CURRENCY")     # spot gold uses the FX 24/5 staleness rule
+
+    def test_descending_input_is_sorted_ascending(self):
+        self._patch({"meta": {"type": "Digital Currency"},
+                     "values": [{"datetime": "2026-06-22", "open": "2", "high": "2", "low": "2", "close": "2"},
+                                {"datetime": "2026-06-20", "open": "1", "high": "1", "low": "1", "close": "1"}],
+                     "status": "ok"})
+        _, rows = I.twelvedata_chart("BTC-USD", "1d", "1mo", "k")
+        self.assertTrue(rows[0]["ts"] < rows[1]["ts"])
+        self.assertEqual(rows[-1]["c"], 2)
+
+    def test_intraday_datetime_parsed(self):
+        self._patch({"meta": {"type": "Common Stock"},
+                     "values": [{"datetime": "2026-06-22 16:30:00", "open": "300", "high": "301",
+                                 "low": "299", "close": "300.5", "volume": "666556"}], "status": "ok"})
+        _, rows = I.twelvedata_chart("AAPL", "60m", "10d", "k")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(datetime.fromtimestamp(rows[0]["ts"], tz=timezone.utc).hour, 16)
+
+    def test_error_status_raises(self):
+        self._patch({"status": "error", "code": 429, "message": "You have run out of API credits"})
+        self.assertRaises(ValueError, I.twelvedata_chart, "AAPL", "1d", "1mo", "k")
+
+    def test_uncovered_symbol_raises_without_fetch(self):
+        # no monkeypatch: must raise from the mapping, never hitting the network
+        self.assertRaises(ValueError, I.twelvedata_chart, "GC=F", "1d", "1mo", "k")
+
+    def test_explicit_td_symbol_bypasses_uncovered_check(self):
+        # gold: GC=F maps to None, but an explicit td_symbol (XAU/USD spot) routes it to TD directly
+        self._patch({"meta": {"type": "Precious Metal"},
+                     "values": [{"datetime": "2026-06-22", "open": "4100", "high": "4200",
+                                 "low": "4090", "close": "4187"}], "status": "ok"})
+        meta, rows = I.twelvedata_chart("GC=F", "1d", "1mo", "k", td_symbol="XAU/USD")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(meta["instrumentType"], "CURRENCY")
+
+
+class TestFetchChartTwelveData(unittest.TestCase):
+    def setUp(self):
+        self._yc, self._td = I.yahoo_chart, I.twelvedata_chart
+
+    def tearDown(self):
+        I.yahoo_chart, I.twelvedata_chart = self._yc, self._td
+
+    def test_covered_symbol_served_by_twelvedata(self):
+        I.twelvedata_chart = lambda *a, **k: ({"instrumentType": "EQUITY"},
+                                              [{"ts": 1, "o": 1, "h": 1, "l": 1, "c": 1, "v": 0}])
+        meta, rows = I.fetch_chart("AAPL", "1d", "1mo", provider="twelvedata", api_key="k")
+        self.assertEqual(meta["provider"], "twelvedata")
+        self.assertIsNone(meta["provider_note"])
+
+    def test_uncovered_futures_falls_back_to_yahoo(self):
+        I.yahoo_chart = lambda *a, **k: ({"instrumentType": "FUTURE"},
+                                         [{"ts": 1, "o": 1, "h": 1, "l": 1, "c": 1, "v": 0}])
+        meta, rows = I.fetch_chart("GC=F", "1d", "1mo", provider="twelvedata", api_key="k")
+        self.assertEqual(meta["provider"], "yahoo")
+        self.assertIn("not covered by twelvedata", meta["provider_note"])
+
+    def test_twelvedata_error_falls_back_to_yahoo(self):
+        I.twelvedata_chart = lambda *a, **k: (_ for _ in ()).throw(ValueError("out of credits"))
+        I.yahoo_chart = lambda *a, **k: ({"instrumentType": "EQUITY"},
+                                         [{"ts": 1, "o": 1, "h": 1, "l": 1, "c": 1, "v": 0}])
+        meta, rows = I.fetch_chart("AAPL", "1d", "1mo", provider="twelvedata", api_key="k")
+        self.assertEqual(meta["provider"], "yahoo")
+        self.assertIn("twelvedata failed", meta["provider_note"])
+
+    def test_missing_key_falls_back_to_yahoo(self):
+        I.yahoo_chart = lambda *a, **k: ({"instrumentType": "EQUITY"},
+                                         [{"ts": 1, "o": 1, "h": 1, "l": 1, "c": 1, "v": 0}])
+        meta, rows = I.fetch_chart("AAPL", "1d", "1mo", provider="twelvedata", api_key=None)
+        self.assertEqual(meta["provider"], "yahoo")
+        self.assertIn("TWELVEDATA_API_KEY not set", meta["provider_note"])
+
+    def test_explicit_td_symbol_routes_uncovered_to_twelvedata(self):
+        # gold GC=F maps to None normally; an explicit td_symbol sends it to TD (spot) anyway
+        captured = {}
+        def fake(symbol, interval, rng, api_key, td_symbol=None):
+            captured["td"] = td_symbol
+            return ({"instrumentType": "CURRENCY"}, [{"ts": 1, "o": 1, "h": 1, "l": 1, "c": 1, "v": 0}])
+        I.twelvedata_chart = fake
+        meta, rows = I.fetch_chart("GC=F", "1d", "1mo", provider="twelvedata", api_key="k", td_symbol="XAU/USD")
+        self.assertEqual(meta["provider"], "twelvedata")
+        self.assertEqual(captured["td"], "XAU/USD")
+
+
+class TestTwelveDataThrottle(unittest.TestCase):
+    def test_spaces_calls_by_interval(self):
+        # mocked monotonic clock: 1st call sets the baseline (no sleep), 2nd call 1s later must sleep
+        # the remaining 4s of a 5s interval. time.sleep is captured, never actually slept (non-flaky).
+        prev = os.environ.get("TWELVEDATA_MIN_INTERVAL_S")
+        os.environ["TWELVEDATA_MIN_INTERVAL_S"] = "5"
+        I._TD_STATE["last"] = 0.0
+        sleeps = []
+        orig_sleep, orig_mono = I.time.sleep, I.time.monotonic
+        clock = iter([100.0, 100.0, 101.0, 101.0])
+        I.time.sleep = lambda s: sleeps.append(s)
+        I.time.monotonic = lambda: next(clock)
+        try:
+            I._td_throttle()    # last=0 -> wait=5-(100-0)<0 -> no sleep; last=100
+            I._td_throttle()    # wait=5-(101-100)=4 -> sleep 4; last=101
+        finally:
+            I.time.sleep, I.time.monotonic = orig_sleep, orig_mono
+            if prev is None:
+                os.environ.pop("TWELVEDATA_MIN_INTERVAL_S", None)
+            else:
+                os.environ["TWELVEDATA_MIN_INTERVAL_S"] = prev
+        self.assertEqual(len(sleeps), 1)
+        self.assertAlmostEqual(sleeps[0], 4.0, places=6)
+
+    def test_disabled_when_zero(self):
+        os.environ["TWELVEDATA_MIN_INTERVAL_S"] = "0"
+        I._TD_STATE["last"] = 0.0
+        slept = []
+        orig = I.time.sleep
+        I.time.sleep = lambda s: slept.append(s)
+        try:
+            I._td_throttle()
+            I._td_throttle()
+        finally:
+            I.time.sleep = orig
+        self.assertEqual(slept, [])
+
+    def test_rate_per_min_derives_interval(self):
+        prev = (os.environ.get("TWELVEDATA_RATE_PER_MIN"), os.environ.get("TWELVEDATA_MIN_INTERVAL_S"))
+        try:
+            os.environ.pop("TWELVEDATA_MIN_INTERVAL_S", None)
+            os.environ["TWELVEDATA_RATE_PER_MIN"] = "55"        # Grow: 55/min -> ~1.15s spacing
+            self.assertAlmostEqual(I._td_interval(), 60.0 / 55 * 1.05, places=4)
+            os.environ["TWELVEDATA_RATE_PER_MIN"] = "8"         # Basic
+            self.assertAlmostEqual(I._td_interval(), 60.0 / 8 * 1.05, places=4)
+            os.environ["TWELVEDATA_RATE_PER_MIN"] = "0"         # disabled
+            self.assertEqual(I._td_interval(), 0.0)
+        finally:
+            for k, v in zip(("TWELVEDATA_RATE_PER_MIN", "TWELVEDATA_MIN_INTERVAL_S"), prev):
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
+class TestFreshnessSessionProfile(unittest.TestCase):
+    # 2026-06-15 is a Monday; 17:00 UTC = 13:00 ET = mid US regular session.
+    NOW = datetime(2026, 6, 15, 17, 0, tzinfo=timezone.utc)
+
+    def _rows(self, age):
+        last = self.NOW - age
+        return [{"ts": int(last.timestamp()), "o": 1, "h": 1, "l": 1, "c": 1, "v": 0}]
+
+    def test_in_session_provider_equity_flagged_stale(self):
+        # provider equity (no currentTradingPeriod) that's in-session and 3h stale -> stale=True
+        meta = {"instrumentType": "EQUITY", "currentTradingPeriod": None}
+        f = I.freshness_block(meta, self._rows(timedelta(hours=3)), now=self.NOW,
+                              session_profile="us_equity_rth")
+        self.assertEqual(f["market_state"], "open")
+        self.assertTrue(f["stale"])
+
+    def test_fresh_in_session_provider_equity_not_stale(self):
+        meta = {"instrumentType": "EQUITY", "currentTradingPeriod": None}
+        f = I.freshness_block(meta, self._rows(timedelta(minutes=30)), now=self.NOW,
+                              session_profile="us_equity_rth")
+        self.assertFalse(f["stale"])
+
+    def test_without_profile_uses_lax_96h_rule(self):
+        # no session_profile -> the prior lax behaviour: 3h-old in-session equity NOT flagged
+        meta = {"instrumentType": "EQUITY", "currentTradingPeriod": None}
+        f = I.freshness_block(meta, self._rows(timedelta(hours=3)), now=self.NOW)
+        self.assertFalse(f["stale"])
 
 
 if __name__ == "__main__":

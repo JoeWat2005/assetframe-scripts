@@ -64,11 +64,13 @@ class TestGetWindow(unittest.TestCase):
     def test_standard_windows_identical_to_get_session(self):
         # SAFETY: the live universe must be byte-identical. get_window with any standard /
         # empty / unknown forecast window returns exactly get_session().
+        # NB: next_liquid_session is NO LONGER identical for 24/5 venues (it now targets the next
+        # daily close, not the weekly close) — that divergence is the fix, asserted separately below.
         for p in self.PROFILES:
             for m in self.MOMENTS:
                 base = SS.get_session(p, now=m)
                 for fw in (None, "next_session", "next_regular_session",
-                           "next_liquid_session", "rolling_24h", "garbage"):
+                           "rolling_24h", "garbage"):
                     self.assertEqual(SS.get_window(p, now=m, forecast_window=fw), base,
                                      f"{p} {fw} {m} diverged from get_session")
 
@@ -89,6 +91,35 @@ class TestGetWindow(unittest.TestCase):
         w = SS.get_window("crypto_24_7", now=m, forecast_window="next_week")
         self.assertEqual(w["window_start_utc"], "2026-06-15 05:00")
         self.assertEqual(w["window_end_utc"], "2026-06-22 05:00")
+
+    def test_next_liquid_session_is_daily_for_24_5(self):
+        # THE FX BUG FIX: next_liquid_session must target the NEXT DAILY close (~1 session), NOT
+        # the Friday weekly close that made Mon-Thu reports overlap and double-count in calibration.
+        mon = datetime(2026, 6, 15, 8, 0, tzinfo=timezone.utc)   # Monday morning
+        for p in ("fx_spot", "cme_futures"):
+            base = SS.get_session(p, now=mon)
+            w = SS.get_window(p, now=mon, forecast_window="next_liquid_session")
+            self.assertEqual(w["window_start_utc"], base["window_start_utc"])
+            self.assertLess(w["window_end_utc"], base["window_end_utc"], f"{p} still weekly")
+            span_h = ((datetime.strptime(w["window_end_utc"], "%Y-%m-%d %H:%M")
+                       - datetime.strptime(w["window_start_utc"], "%Y-%m-%d %H:%M")
+                       ).total_seconds() / 3600)
+            self.assertLessEqual(span_h, 30, f"{p} window {span_h}h is not ~daily")
+            self.assertEqual(w["forecast_window"], "next_liquid_session")
+
+    def test_next_liquid_session_non_overlapping_across_days(self):
+        mon = SS.get_window("fx_spot", now=datetime(2026, 6, 15, 8, 0, tzinfo=timezone.utc),
+                            forecast_window="next_liquid_session")
+        tue = SS.get_window("fx_spot", now=datetime(2026, 6, 16, 8, 0, tzinfo=timezone.utc),
+                            forecast_window="next_liquid_session")
+        self.assertNotEqual(mon["window_end_utc"], tue["window_end_utc"])   # the overlap bug
+        self.assertLessEqual(mon["window_end_utc"], tue["window_start_utc"])  # no overlap
+
+    def test_next_liquid_session_unchanged_for_equity_and_crypto(self):
+        m = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+        for p in ("us_equity_rth", "crypto_24_7"):
+            self.assertEqual(SS.get_window(p, now=m, forecast_window="next_liquid_session"),
+                             SS.get_session(p, now=m))
 
 
 class TestEquitySessions(unittest.TestCase):

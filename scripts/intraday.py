@@ -3,8 +3,9 @@
 Usage:
   python scripts/intraday.py SYMBOL [--name NAME] [--datadir data]
          [--hrange 10d] [--drange 1y] [--roll-utc 22] [--related "SYM1,SYM2,SYM3"]
-         [--provider yahoo|eodhd] [--anchor live|prior-completed|friday]
-         [--as-of "YYYY-MM-DD HH:MM"]
+         [--provider yahoo|eodhd|twelvedata] [--anchor live|prior-completed|friday]
+         [--as-of "YYYY-MM-DD HH:MM"] [--session-profile fx_spot|us_equity_rth|...]
+         [--td-symbol XAU/USD]
 
 --as-of TRIMS every fetched series (hourly/daily/related) to bars at/<= that UTC
 moment BEFORE any indicator/pivot/session/freshness computation or CSV write, so the
@@ -36,6 +37,12 @@ BTC-USD, AAPL ... The provider layer maps them per provider.
 Data providers:
   yahoo (default)  Yahoo chart API, no key. Unofficial: fine for personal/dev use,
                    NOT licensed for a commercial product.
+  twelvedata       Set ADVISOR_DATA_PROVIDER=twelvedata + TWELVEDATA_API_KEY=... (or pass
+                   --provider twelvedata). Licensed self-serve feed covering US equities/
+                   ETFs, forex (incl. XAU/USD spot gold), and crypto. Futures (=F) and
+                   indices (^) are NOT requested from it and come from Yahoo; any failed/
+                   empty fetch also falls back to Yahoo per-fetch. Basic plan: 8 req/min,
+                   800 credits/day (1 credit per series).
   eodhd            Set ADVISOR_DATA_PROVIDER=eodhd + EODHD_API_KEY=... (or pass
                    --provider eodhd). Licensed feed; LSE 15-min delayed. Futures (=F)
                    are not covered by EODHD and always come from Yahoo; any failed
@@ -71,7 +78,7 @@ Methodology (industry standard):
     plus ATR bands anchored on TODAY'S session open (open +/- 0.5*ATRd inner, +/- 1.0*ATRd outer).
 """
 import concurrent.futures
-import csv, json, math, os, sys, urllib.parse, urllib.request
+import csv, json, math, os, sys, threading, time, urllib.parse, urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -284,20 +291,167 @@ def coingecko_chart(symbol, rng):
     return meta, rows
 
 
-def fetch_chart(symbol, interval, rng, provider=None, api_key=None):
+# --- Twelve Data adapter (licensed self-serve feed: US equities/ETFs, forex incl. XAU/USD
+# spot gold, crypto). Set ADVISOR_DATA_PROVIDER=twelvedata + TWELVEDATA_API_KEY. Futures (=F)
+# and indices (^) are intentionally NOT requested from it (Yahoo serves them); any failed /
+# empty fetch also falls back to Yahoo per-fetch. Symbols use a SLASH pair format (GBP/USD,
+# XAU/USD, BTC/USD) mapped from the Yahoo symbol. Verified live 2026-06-22: values are STRINGS,
+# ascending with order=ASC, datetime is 'YYYY-MM-DD' (daily) or 'YYYY-MM-DD HH:MM:SS' (intraday)
+# in UTC with timezone=UTC, volume is absent for fx/crypto/metal, and errors come back as
+# HTTP 200 with {"status":"error", ...} — so status is checked explicitly, not the HTTP code.
+_TWELVEDATA_TYPE_MAP = {"Common Stock": "EQUITY", "ETF": "ETF", "Index": "INDEX",
+                        "Digital Currency": "CRYPTOCURRENCY", "Physical Currency": "CURRENCY",
+                        "Precious Metal": "CURRENCY"}
+
+# Twelve Data rate throttle. The Basic (free) plan allows only 8 requests/minute. intraday fetches
+# hourly+daily+related concurrently and run_daily fans out multiple assets, so without pacing a run
+# bursts well past 8/min and most calls 429 -> fall back to Yahoo (clean, but then the licensed feed
+# goes unused). This PROCESS-GLOBAL throttle spaces TD requests >= TWELVEDATA_MIN_INTERVAL_S apart
+# (default 8s => <=7.5/min); set the env to 0 on a paid tier to disable. run_daily clamps its asset
+# workers to 1 while this is active so the spacing holds across the whole run (one process at a time).
+_TD_LOCK = threading.Lock()
+_TD_STATE = {"last": 0.0}
+
+
+def _td_interval():
+    """Min seconds between Twelve Data calls. Prefer TWELVEDATA_RATE_PER_MIN (the plan's per-minute
+    credit limit — 8 on Basic, 55 on Grow) -> 60/rate with a 5% margin; else TWELVEDATA_MIN_INTERVAL_S
+    (explicit seconds, default 8). Either set to 0 to disable pacing on a tier with ample headroom."""
+    rate = os.environ.get("TWELVEDATA_RATE_PER_MIN")
+    if rate not in (None, ""):
+        try:
+            r = float(rate)
+            return (60.0 / r) * 1.05 if r > 0 else 0.0
+        except ValueError:
+            pass
+    try:
+        return float(os.environ.get("TWELVEDATA_MIN_INTERVAL_S", "8") or 0)
+    except ValueError:
+        return 8.0
+
+
+def _td_throttle():
+    interval = _td_interval()
+    if interval <= 0:
+        return
+    with _TD_LOCK:
+        wait = interval - (time.monotonic() - _TD_STATE["last"])
+        if wait > 0:
+            time.sleep(wait)
+        _TD_STATE["last"] = time.monotonic()
+
+
+def map_symbol_twelvedata(sym):
+    """Yahoo symbol -> (twelvedata symbol | None, asset_class). None => not covered, so the
+    fetch chain serves it from Yahoo. Futures (=F), indices (^) and exchange-suffixed equities
+    (BP.L, DX-Y.NYB) are intentionally left to Yahoo; FX/metal -> 'AAA/BBB', crypto 'BTC-USD' ->
+    'BTC/USD', US equities pass through (AAPL)."""
+    if "/" in sym:                         # already a slash pair = not a Yahoo symbol; let Yahoo handle it
+        return None, "non-yahoo-symbol"
+    if sym.endswith("=F"):
+        return None, "futures"
+    if sym.endswith("=X"):
+        base = sym[:-2]
+        if len(base) == 3:                 # Yahoo 'JPY=X' means USD/JPY
+            return "USD/" + base, "forex"
+        if len(base) == 6:                 # GBPUSD=X -> GBP/USD ; XAUUSD=X -> XAU/USD
+            return base[:3] + "/" + base[3:], "forex"
+        return None, "forex"
+    if sym.startswith("^"):
+        return None, "index"
+    if "-" in sym and "." not in sym:
+        b, _, q = sym.rpartition("-")
+        if b and q in CRYPTO_QUOTES:       # BTC-USD -> BTC/USD
+            return b + "/" + q, "crypto"
+    if "." in sym:                         # exchange-suffixed: leave to Yahoo
+        return None, "equity"
+    return sym, "equity"                   # AAPL -> AAPL
+
+
+def twelvedata_chart(symbol, interval, rng, api_key, td_symbol=None):
+    """Twelve Data time_series -> (meta, rows ascending UTC). `td_symbol` (e.g. 'XAU/USD') is an
+    explicit per-asset override used directly, bypassing the yahoo->TD mapping — so e.g. gold can be
+    yahoo GC=F (futures) for the Yahoo fallback but XAU/USD (spot) on TD. Raises ValueError on an
+    uncovered symbol or any non-ok payload (the fetch chain then falls back to Yahoo)."""
+    if td_symbol:
+        tsym = td_symbol
+    else:
+        tsym, klass = map_symbol_twelvedata(symbol)
+        if tsym is None:
+            raise ValueError(f"twelvedata does not cover {klass}")
+    tiv = {"60m": "1h", "1h": "1h", "1d": "1day", "5m": "5min", "1m": "1min"}.get(interval, "1day")
+    span_days = max(1, range_to_timedelta(rng).days)
+    outsize = min(5000, max(60, span_days + 5) if tiv == "1day" else max(120, span_days * 8))
+    url = (f"https://api.twelvedata.com/time_series?symbol={urllib.parse.quote(tsym)}"
+           f"&interval={tiv}&outputsize={outsize}&order=ASC&timezone=UTC&apikey={api_key}")
+    _td_throttle()                          # pace under the Basic plan's 8 req/min ceiling
+    data = _http_json(url)
+    if not isinstance(data, dict) or data.get("status") != "ok":
+        msg = data.get("message") if isinstance(data, dict) else str(data)[:80]
+        raise ValueError(f"twelvedata error for {tsym}: {str(msg)[:100]}")
+    rows = []
+    for r in data.get("values") or []:
+        try:
+            o, h, l, c = float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        dt = r.get("datetime")
+        if not dt:
+            continue
+        try:
+            ts = int(datetime.strptime(dt, "%Y-%m-%d %H:%M:%S" if len(dt) > 10 else "%Y-%m-%d")
+                     .replace(tzinfo=timezone.utc).timestamp())
+        except ValueError:
+            continue
+        vol = r.get("volume")
+        try:
+            vol = float(vol) if vol not in (None, "") else 0
+        except (TypeError, ValueError):
+            vol = 0
+        rows.append({"ts": ts, "o": o, "h": h, "l": l, "c": c, "v": vol})
+    rows.sort(key=lambda x: x["ts"])       # order=ASC already, but never trust ordering blindly
+    m = data.get("meta") or {}
+    meta = {"exchangeTimezoneName": m.get("exchange_timezone") or "UTC",
+            "regularMarketPrice": rows[-1]["c"] if rows else None,
+            "instrumentType": _TWELVEDATA_TYPE_MAP.get(m.get("type"), "EQUITY"),
+            "currentTradingPeriod": None}
+    return meta, rows
+
+
+def fetch_chart(symbol, interval, rng, provider=None, api_key=None, td_symbol=None):
     """Provider-agnostic OHLCV fetch -> (meta, rows ascending UTC).
     meta keys: exchangeTimezoneName, regularMarketPrice, instrumentType,
     currentTradingPeriod (None if the provider lacks it), provider, provider_note.
 
-    Provider chain: configured provider (eodhd) -> Yahoo (query1->query2 host failover) ->
-    CoinGecko (crypto only). The CoinGecko leg is keyless, DAILY-only, and reached ONLY when
-    the essential daily series fails everywhere else, so a single-vendor outage no longer aborts
-    the whole asset. Hourly keeps its prior behaviour (a failed/empty hourly degrades to
-    daily-only analysis downstream)."""
+    Provider chain: configured provider (twelvedata / eodhd) -> Yahoo (query1->query2 host
+    failover) -> CoinGecko (crypto only). The CoinGecko leg is keyless, DAILY-only, and reached
+    ONLY when the essential daily series fails everywhere else, so a single-vendor outage no
+    longer aborts the whole asset. Hourly keeps its prior behaviour (a failed/empty hourly
+    degrades to daily-only analysis downstream)."""
     provider = provider or PROVIDER_DEFAULT
-    api_key = api_key or os.environ.get("EODHD_API_KEY")
+    if api_key is None:
+        api_key = (os.environ.get("TWELVEDATA_API_KEY") if provider == "twelvedata"
+                   else os.environ.get("EODHD_API_KEY"))
     note = None
-    if provider == "eodhd":
+    if provider == "twelvedata":
+        if td_symbol:
+            tsym, klass = td_symbol, "explicit"
+        else:
+            tsym, klass = map_symbol_twelvedata(symbol)
+        if tsym is None:
+            note = f"{klass} not covered by twelvedata; served by yahoo"
+        elif not api_key:
+            note = "TWELVEDATA_API_KEY not set; served by yahoo"
+        else:
+            try:
+                meta, rows = twelvedata_chart(symbol, interval, rng, api_key, td_symbol=tsym)
+                if rows:
+                    meta["provider"], meta["provider_note"] = "twelvedata", None
+                    return meta, rows
+                note = "twelvedata returned 0 rows; served by yahoo"
+            except Exception as ex:
+                note = f"twelvedata failed ({str(ex)[:60]}); served by yahoo"
+    elif provider == "eodhd":
         esym, klass = map_symbol_eodhd(symbol)
         if esym is None:
             note = f"{klass} not covered by eodhd; served by yahoo"
@@ -337,7 +491,7 @@ def fetch_chart(symbol, interval, rng, provider=None, api_key=None):
     raise RuntimeError(f"no daily data for {symbol}: {'; '.join(x for x in (note, ynote) if x)}")
 
 
-def freshness_block(meta, rows, now=None, granularity="hourly"):
+def freshness_block(meta, rows, now=None, granularity="hourly", session_profile=None):
     """Staleness + market-state read on the freshest bar of `rows`.
     Only unambiguous problems set stale=true; marginal calls are left to the skill
     via market_state + age_minutes:
@@ -378,6 +532,25 @@ def freshness_block(meta, rows, now=None, granularity="hourly"):
                 state, stale = "open", age_min > 90
             else:
                 state, stale = "closed_offhours", age_min > 96 * 60
+        elif session_profile:
+            # Provider feeds (eodhd / twelvedata) don't return exchange session bounds, so without
+            # this an in-session-but-stale equity would fall through to the lax 96h dead-feed rule
+            # and publish at full confidence. Derive in-session state from the session profile and
+            # apply the strict 90-min in-session staleness instead. (Holidays aren't passed here, so
+            # a holiday is treated as in-session -> over-flags stale: conservative/safe, and rare
+            # since the scheduler skips holidays anyway.)
+            try:
+                _d = os.path.dirname(os.path.abspath(__file__))   # robust import: scripts/ on path
+                if _d not in sys.path:
+                    sys.path.insert(0, _d)
+                from sessions import get_session as _gs
+                st = _gs(session_profile, now=now).get("market_state", "")
+                if st in ("open_regular_session", "open_closing_soon"):
+                    state, stale = "open", age_min > 90
+                else:
+                    state, stale = (st or "closed_offhours"), age_min > 96 * 60
+            except Exception:
+                pass
     if granularity == "daily":
         stale = age_min > 96 * 60
     return {"last_bar_utc": last.strftime("%Y-%m-%d %H:%M"), "age_minutes": age_min,
@@ -562,6 +735,8 @@ def main():
     hrange, drange = args.get("--hrange", "10d"), args.get("--drange", "1y")
     roll = int(args.get("--roll-utc", "0"))
     provider = args.get("--provider")
+    session_profile = args.get("--session-profile")  # enables in-session staleness for provider equities
+    td_symbol = args.get("--td-symbol")  # explicit Twelve Data symbol override (e.g. XAU/USD for gold)
     rel_syms = [s.strip() for s in args.get("--related", "").split(",") if s.strip()]
     anchor_mode = args.get("--anchor", "live")
     if anchor_mode not in ("live", "prior-completed", "friday"):
@@ -596,8 +771,8 @@ def main():
     # all network fetches run concurrently (network-bound; stdlib threads)
     errors = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-        fut_h = pool.submit(fetch_chart, symbol, "60m", hfetch, provider)
-        fut_d = pool.submit(fetch_chart, symbol, "1d", dfetch, provider)
+        fut_h = pool.submit(fetch_chart, symbol, "60m", hfetch, provider, None, td_symbol)
+        fut_d = pool.submit(fetch_chart, symbol, "1d", dfetch, provider, None, td_symbol)
         fut_rel = [(rs, pool.submit(fetch_chart, rs, "1d", "10d", provider)) for rs in rel_syms]
         try:
             meta_h, hourly = fut_h.result()
@@ -730,9 +905,11 @@ def main():
     # freshness from hourly bars whenever any exist (timestamps reflect feed lag
     # honestly even when too thin to analyze); daily bars only as a last resort
     if hourly:
-        fresh = freshness_block(meta_h, hourly, now=cutoff_dt, granularity="hourly")
+        fresh = freshness_block(meta_h, hourly, now=cutoff_dt, granularity="hourly",
+                                session_profile=session_profile)
     else:
-        fresh = freshness_block(meta_d, daily, now=cutoff_dt, granularity="daily")
+        fresh = freshness_block(meta_d, daily, now=cutoff_dt, granularity="daily",
+                                session_profile=session_profile)
     meta_best = (meta_d if degraded else meta_h) or {}
     notes = []
     for m in (meta_h, meta_d):
@@ -822,8 +999,8 @@ def main():
     }
 
     last_px = meta_best.get("regularMarketPrice")
-    if cutoff_ts is not None:  # as-of: the last bar at/<= the cutoff, never the live quote
-        last_px = round((hourly[-1]["c"] if hourly else daily[-1]["c"]), 6)
+    if cutoff_ts is not None or last_px is None:  # as-of (never the live quote), or no provider quote
+        last_px = round((hourly[-1]["c"] if hourly else daily[-1]["c"]), 6)  # -> the last bar's close
     out = {
         "symbol": symbol, "timezone": meta_best.get("exchangeTimezoneName"),
         "fetched_utc": (cutoff_dt or datetime.now(timezone.utc)).strftime("%Y-%m-%d %H:%M"),
