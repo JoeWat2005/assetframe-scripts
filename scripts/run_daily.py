@@ -479,6 +479,9 @@ def generate_asset(asset, now, no_render, as_of=None):
     scmd = ["scripts/scaffold_payload.py", tk, "--session-profile", asset["session_profile"]]
     if asset.get("forecast_window"):
         scmd += ["--forecast-window", asset["forecast_window"]]  # standard windows are a no-op
+    _tfs = asset.get("timeframes") or []
+    if len(_tfs) > 1 or (_tfs and _tfs != [asset.get("forecast_window")]):
+        scmd += ["--timeframes", ",".join(_tfs)]   # multi-timeframe: one report, N horizon tracks
     if backdated:
         scmd += ["--as-of", now_arg]   # past-date the prediction window so it can be scored
     ok, _ = stage("scaffold", scmd)

@@ -614,13 +614,14 @@ def _source_audit_html(brief, analysis, dq):
 def parse_args(argv):
     o = {"analysis": None, "brief": None, "research": None, "social": None,
          "ledger_context": None, "calib": None, "session_profile": None, "forecast_window": None,
-         "out": None, "predictions": None, "as_of": None, "window_end": None, "check": False}
+         "out": None, "predictions": None, "as_of": None, "window_end": None,
+         "timeframes": None, "check": False}
     i = 0
     keys = {"--analysis": "analysis", "--brief": "brief", "--research": "research",
             "--social": "social", "--ledger-context": "ledger_context", "--calib": "calib",
             "--session-profile": "session_profile", "--forecast-window": "forecast_window",
             "--out": "out", "--predictions": "predictions",
-            "--as-of": "as_of", "--window-end": "window_end"}
+            "--as-of": "as_of", "--window-end": "window_end", "--timeframes": "timeframes"}
     while i < len(argv):
         a = argv[i]
         if a == "--check":
@@ -634,6 +635,26 @@ def parse_args(argv):
             die(f"unknown argument {a}")
         i += 1
     return o
+
+
+def _horizon_for(forecast_window):
+    """Taxonomy horizon (the scoring/calibration bucket) for a forecast window."""
+    from sessions import LONG_WINDOWS
+    return "multi_session" if (forecast_window or "").strip().lower() in LONG_WINDOWS else "next_session"
+
+
+_HORIZON_TAG = {"intraday": "H", "next_session": "", "multi_session": "MS"}
+
+
+def _track_report_id(base_report_id, horizon):
+    """Distinct ledger id for a NON-primary timeframe track. A horizon tag is inserted into the
+    date stamp so the ticker (last '-' segment) and year (leading digits) still parse:
+    AF-20260623-GOLD -> AF-20260623MS-GOLD. The primary track keeps the canonical id."""
+    tag = _HORIZON_TAG.get(horizon, (horizon or "")[:2].upper())
+    if not tag:
+        return base_report_id
+    head, _, tick = base_report_id.rpartition("-")
+    return f"{head}{tag}-{tick}" if head else base_report_id + tag
 
 
 def main():
@@ -673,7 +694,14 @@ def main():
     # get_window is horizon-aware: for the standard next-session forecast windows it returns
     # the exact get_session() result (the live universe is unchanged); for 'next_week' /
     # 'next_5_sessions' it extends the window end to a multi-session horizon.
-    session = get_window(profile, now=now_dt, forecast_window=o["forecast_window"])
+    # multi-timeframe: one report carries a prediction TRACK per configured timeframe. The first is
+    # the primary/published window; extras are scored on their own windows under a horizon-tagged id.
+    timeframes = [t.strip() for t in (o["timeframes"] or o["forecast_window"] or "next_session").split(",")
+                  if t.strip()]
+    _seen = set()
+    timeframes = [t for t in timeframes if not (t in _seen or _seen.add(t))]
+    primary_fw = timeframes[0]
+    session = get_window(profile, now=now_dt, forecast_window=primary_fw)
     if now_dt is not None:
         session["window_start_utc"] = now_dt.strftime("%Y-%m-%d %H:%M")
     if o["window_end"]:
@@ -686,6 +714,15 @@ def main():
             die("--window-end must be after the window start / as-of moment")
         session["window_end_utc"] = we[:16]
         session["window_label"] = "explicit window (as-of / retroactive run)"
+    # a window per configured timeframe (track 0 = the primary/published window above)
+    track_specs = [{"forecast_window": primary_fw, "horizon": (brief.get("horizon") or "next_session"),
+                    "window_start_utc": session["window_start_utc"],
+                    "window_end_utc": session["window_end_utc"]}]
+    for tf in timeframes[1:]:
+        w = get_window(profile, now=now_dt, forecast_window=tf)
+        ws = now_dt.strftime("%Y-%m-%d %H:%M") if now_dt is not None else w["window_start_utc"]
+        track_specs.append({"forecast_window": tf, "horizon": _horizon_for(tf),
+                            "window_start_utc": ws, "window_end_utc": w["window_end_utc"]})
     hourly_csv = (analysis.get("files") or {}).get("hourly_csv", f"data/candles/{name}_hourly.csv")
     last_price, last_ts = read_last_bar(hourly_csv)
 
@@ -711,6 +748,7 @@ def main():
     payload = assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
                        setups, ladder, ledger_levels, conf, asset_class, regime, pred_type,
                        as_of_dt=now_dt)
+    payload["timeframes"] = track_specs   # multi-timeframe outlook (one report, N horizon tracks)
 
     predictions = {
         "report_id": payload["report_id"], "instrument": payload["meta"]["instrument"],
@@ -738,6 +776,23 @@ def main():
     pred_out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=1) + "\n", encoding="utf-8")
     pred_out.write_text(json.dumps(predictions, indent=1) + "\n", encoding="utf-8")
+    # extra multi-timeframe tracks: a standard single-window predictions file per NON-primary
+    # timeframe, with a horizon-tagged report_id so the scorer (dedup on report_id) records a
+    # SEPARATE ledger row per horizon — and calibration is horizon-bucketed. The published edition
+    # stays the canonical report_id; these files are scoring-only.
+    extra = []
+    for spec in track_specs[1:]:
+        hz = spec["horizon"]
+        tp = dict(predictions)
+        tp["report_id"] = _track_report_id(predictions["report_id"], hz)
+        tp["window_start_utc"], tp["window_end_utc"] = spec["window_start_utc"], spec["window_end_utc"]
+        tp["forecast_window"] = spec["forecast_window"]
+        tp["taxonomy"] = taxonomy.build_taxonomy(pred_type, direction, hz, asset_class, regime)
+        tf_path = pred_out.parent / f"{name}_{hz}_predictions.json"
+        tf_path.write_text(json.dumps(tp, indent=1) + "\n", encoding="utf-8")
+        extra.append(tf_path.name)
+    if extra:
+        summary["extra_timeframe_files"] = extra
     print(json.dumps(summary, indent=1))
 
 
