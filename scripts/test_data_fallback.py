@@ -361,5 +361,50 @@ class TestFreshnessSessionProfile(unittest.TestCase):
         self.assertFalse(f["stale"])
 
 
+class TestTwelveDataFundamentals(unittest.TestCase):
+    def setUp(self):
+        self._orig = I._td_get
+
+    def tearDown(self):
+        I._td_get = self._orig
+
+    def test_compact_fundamentals_parsed(self):
+        def fake(endpoint, sym, api_key, **kw):
+            if endpoint == "statistics":
+                return {"statistics": {
+                    "valuations_metrics": {"trailing_pe": 36.1, "forward_pe": 31.0,
+                                           "market_capitalization": 4359060534113, "peg_ratio": 1.6},
+                    "financials": {"profit_margin": 0.27, "operating_margin": 0.32,
+                                   "gross_margin": 0.49, "return_on_equity_ttm": 1.41}}}
+            if endpoint == "profile":
+                return {"sector": "Technology", "industry": "Consumer Electronics",
+                        "employees": 166000, "description": "Apple Inc. designs ..."}
+            if endpoint == "earnings":
+                return {"earnings": [{"date": "2026-06-10", "eps_estimate": -0.77,
+                                      "eps_actual": -1.36, "surprise_prc": 76.62}]}
+            return {}
+        I._td_get = fake
+        f = I.twelvedata_fundamentals("AAPL", "k")
+        self.assertEqual(f["source"], "twelvedata")
+        self.assertEqual(f["valuation"]["trailing_pe"], 36.1)
+        self.assertEqual(f["margins"]["profit_margin"], 0.27)
+        self.assertEqual(f["profile"]["sector"], "Technology")
+        self.assertEqual(f["latest_earnings"]["surprise_prc"], 76.62)
+
+    def test_returns_none_when_nothing_usable(self):
+        I._td_get = lambda *a, **k: {}
+        self.assertIsNone(I.twelvedata_fundamentals("AAPL", "k"))
+
+    def test_endpoint_error_captured_not_fatal(self):
+        def fake(endpoint, sym, api_key, **kw):
+            if endpoint == "statistics":
+                raise ValueError("boom")
+            return {"sector": "Tech"} if endpoint == "profile" else {}
+        I._td_get = fake
+        f = I.twelvedata_fundamentals("AAPL", "k")
+        self.assertIn("statistics_error", f)
+        self.assertEqual(f["profile"]["sector"], "Tech")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

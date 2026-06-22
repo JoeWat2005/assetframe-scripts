@@ -403,6 +403,8 @@ def generate_asset(asset, now, no_render, as_of=None):
     _td_sym = (asset.get("provider_symbols") or {}).get("twelvedata")
     if _td_sym:                                   # explicit TD symbol (e.g. gold XAU/USD spot)
         icmd += ["--td-symbol", _td_sym]
+    if asset.get("include_fundamentals"):         # equity fundamentals (narrative-only; TD)
+        icmd += ["--fundamentals", "1"]
     if asset.get("related"):
         icmd += ["--related", asset["related"]]
     if backdated:

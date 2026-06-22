@@ -5,7 +5,7 @@ Usage:
          [--hrange 10d] [--drange 1y] [--roll-utc 22] [--related "SYM1,SYM2,SYM3"]
          [--provider yahoo|eodhd|twelvedata] [--anchor live|prior-completed|friday]
          [--as-of "YYYY-MM-DD HH:MM"] [--session-profile fx_spot|us_equity_rth|...]
-         [--td-symbol XAU/USD]
+         [--td-symbol XAU/USD] [--fundamentals 1]
 
 --as-of TRIMS every fetched series (hourly/daily/related) to bars at/<= that UTC
 moment BEFORE any indicator/pivot/session/freshness computation or CSV write, so the
@@ -416,6 +416,63 @@ def twelvedata_chart(symbol, interval, rng, api_key, td_symbol=None):
             "instrumentType": _TWELVEDATA_TYPE_MAP.get(m.get("type"), "EQUITY"),
             "currentTradingPeriod": None}
     return meta, rows
+
+
+def _td_get(endpoint, symbol, api_key, **params):
+    """One Twelve Data fundamentals GET (throttled, same per-minute budget as the chart fetch).
+    Returns the parsed dict; raises ValueError on an error payload."""
+    extra = "".join(f"&{k}={urllib.parse.quote(str(v))}" for k, v in params.items())
+    url = (f"https://api.twelvedata.com/{endpoint}?symbol={urllib.parse.quote(symbol)}"
+           f"&apikey={api_key}{extra}")
+    _td_throttle()
+    data = _http_json(url)
+    if isinstance(data, dict) and data.get("status") == "error":
+        raise ValueError(f"twelvedata {endpoint} error: {str(data.get('message'))[:80]}")
+    return data
+
+
+def twelvedata_fundamentals(symbol, api_key, td_symbol=None):
+    """Compact equity fundamentals from Twelve Data (statistics + profile + most-recent earnings).
+    Best-effort: each missing piece is simply omitted; returns a dict, or None if nothing usable.
+    NARRATIVE/CONTEXT ONLY — never fed into confidence/scoring (slow-moving; would risk look-ahead)."""
+    sym = td_symbol or symbol
+    out, got = {"source": "twelvedata", "symbol": sym}, False
+    try:
+        st = (_td_get("statistics", sym, api_key).get("statistics") or {})
+        vm, fin, sd = (st.get("valuations_metrics") or {}, st.get("financials") or {},
+                       st.get("stock_statistics") or {})
+        val = {k: vm[k] for k in ("market_capitalization", "trailing_pe", "forward_pe", "peg_ratio",
+                                  "price_to_sales_ttm", "price_to_book_mrq") if vm.get(k) is not None}
+        marg = {k: fin[k] for k in ("gross_margin", "operating_margin", "profit_margin",
+                                    "return_on_equity_ttm", "return_on_assets_ttm") if fin.get(k) is not None}
+        shr = {k: sd[k] for k in ("shares_outstanding", "52_week_high", "52_week_low", "beta")
+               if sd.get(k) is not None}
+        if val: out["valuation"] = val
+        if marg: out["margins"] = marg
+        if shr: out["share_stats"] = shr
+        got = got or bool(val or marg)
+    except Exception as ex:
+        out["statistics_error"] = str(ex)[:80]
+    try:
+        pr = _td_get("profile", sym, api_key)
+        prof = {k: pr[k] for k in ("sector", "industry", "employees", "website") if pr.get(k) is not None}
+        if (pr.get("description") or "").strip():
+            prof["description"] = pr["description"].strip()[:400]
+        if prof: out["profile"] = prof
+        got = got or bool(prof)
+    except Exception as ex:
+        out["profile_error"] = str(ex)[:80]
+    try:
+        er = (_td_get("earnings", sym, api_key, outputsize=1).get("earnings") or [])
+        if er:
+            e = er[0]
+            le = {k: e[k] for k in ("date", "eps_estimate", "eps_actual", "surprise_prc")
+                  if e.get(k) is not None}
+            if le: out["latest_earnings"] = le; got = True
+    except Exception as ex:
+        out["earnings_error"] = str(ex)[:80]
+    out["fetched_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    return out if got else None
 
 
 def fetch_chart(symbol, interval, rng, provider=None, api_key=None, td_symbol=None):
@@ -1001,6 +1058,19 @@ def main():
     last_px = meta_best.get("regularMarketPrice")
     if cutoff_ts is not None or last_px is None:  # as-of (never the live quote), or no provider quote
         last_px = round((hourly[-1]["c"] if hourly else daily[-1]["c"]), 6)  # -> the last bar's close
+
+    # Optional equity fundamentals (Twelve Data). Best-effort + NARRATIVE-ONLY (never scored).
+    # Skipped for backdated (--as-of) runs: a current snapshot would be anachronistic / look-ahead.
+    fundamentals = None
+    if (args.get("--fundamentals") in ("1", "true", "on", "yes")
+            and (provider or PROVIDER_DEFAULT) == "twelvedata" and cutoff_ts is None):
+        fkey = os.environ.get("TWELVEDATA_API_KEY")
+        if fkey:
+            try:
+                fundamentals = twelvedata_fundamentals(symbol, fkey, td_symbol=td_symbol)
+            except Exception as ex:
+                errors["fundamentals"] = str(ex)[:100]
+
     out = {
         "symbol": symbol, "timezone": meta_best.get("exchangeTimezoneName"),
         "fetched_utc": (cutoff_dt or datetime.now(timezone.utc)).strftime("%Y-%m-%d %H:%M"),
@@ -1042,6 +1112,8 @@ def main():
             out["pivots_classic_live"] = pivots_live_out
         if bands_live_out is not None:
             out["atr_day_bands_live"] = bands_live_out
+    if fundamentals is not None:
+        out["fundamentals"] = fundamentals
     (analysis_dir / f"{name}_analysis.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
     print(json.dumps(out, indent=1))
 
