@@ -893,13 +893,24 @@ def _sync_assets_from_neon(conn):
     config, so the dashboard can't break generation. Returns (ok: bool, message: str). Called by the
     sync_assets command AND on poller startup, so after ANY deploy/restart the box's config reflects
     the dashboard (and the git-tracked config/assets.json default is just a bootstrap)."""
+    base_sql = ("id, name, instrument, ticker, provider_symbols, asset_class, session_profile, "
+                "cadence, timezone, roll_utc, related, forecast_window, publish_policy, report_tier, enabled")
+    mt_sql = ", cadence_day, timeframes, include_fundamentals, include_news, fundamentals_source"
+    # Try the multi-timeframe columns; if the migration that adds them hasn't run on this box's DB
+    # yet (deploy skew: new code + old DB), fall back to the base columns so the sync still works.
     try:
         rows = conn.execute(
-            "SELECT id, name, instrument, ticker, provider_symbols, asset_class, session_profile, "
-            "cadence, timezone, roll_utc, related, forecast_window, publish_policy, report_tier, enabled "
-            "FROM engine_assets ORDER BY sort_order, id").fetchall()
+            f"SELECT {base_sql}{mt_sql} FROM engine_assets ORDER BY sort_order, id").fetchall()
     except psycopg.errors.UndefinedTable:
         return False, "engine_assets not migrated yet"
+    except psycopg.errors.UndefinedColumn:
+        try:
+            rows = conn.execute(
+                f"SELECT {base_sql} FROM engine_assets ORDER BY sort_order, id").fetchall()
+        except psycopg.errors.UndefinedTable:
+            return False, "engine_assets not migrated yet"
+        except Exception as ex:
+            return False, f"could not read engine_assets: {ex}"[:200]
     except Exception as ex:
         return False, f"could not read engine_assets: {ex}"[:200]
     if not rows:
@@ -912,14 +923,32 @@ def _sync_assets_from_neon(conn):
                 ps = json.loads(ps)
             except Exception:
                 ps = {}
-        assets.append({
+        a = {
             "id": r.get("id"), "name": r.get("name"), "instrument": r.get("instrument"),
             "ticker": r.get("ticker"), "provider_symbols": ps or {}, "asset_class": r.get("asset_class"),
             "session_profile": r.get("session_profile"), "cadence": r.get("cadence"),
             "timezone": r.get("timezone"), "roll_utc": r.get("roll_utc"), "related": r.get("related") or "",
             "forecast_window": r.get("forecast_window"), "publish_policy": r.get("publish_policy"),
             "report_tier": r.get("report_tier"), "enabled": bool(r.get("enabled")),
-        })
+        }
+        # multi-timeframe + fetch config — omit nulls/empties so config_loader applies its defaults.
+        if r.get("cadence_day") not in (None, ""):
+            a["cadence_day"] = r.get("cadence_day")
+        tfs = r.get("timeframes")
+        if isinstance(tfs, str):
+            try:
+                tfs = json.loads(tfs)
+            except Exception:
+                tfs = None
+        if isinstance(tfs, list) and tfs:
+            a["timeframes"] = [str(t) for t in tfs]
+        if r.get("include_fundamentals") is not None:
+            a["include_fundamentals"] = bool(r.get("include_fundamentals"))
+        if r.get("include_news") is not None:
+            a["include_news"] = bool(r.get("include_news"))
+        if r.get("fundamentals_source"):
+            a["fundamentals_source"] = r.get("fundamentals_source")
+        assets.append(a)
     cfg = ROOT / "config" / "assets.json"
     tmp = ROOT / "config" / "assets.json.tmp"
     try:
