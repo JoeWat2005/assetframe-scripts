@@ -57,8 +57,11 @@ BANNED = [r"sure trade", r"risk[- ]free(?!\s+(rate|yield|asset|benchmark))", r"e
           r"you should buy", r"you should sell"]  # "risk-free RATE/yield/asset" is legit finance
 # phrases allowed ONLY in negated compliance form ("no outcome is guaranteed",
 # "not a personal recommendation")
-NEGATED_ONLY = {"guaranteed": r"(no outcome is |not |never |nothing .{0,12}is )$",
-                "personal recommendation": r"(not a |not |no |never a |nothing here is a )$"}
+# A negation token anywhere in the short preceding window clears these (so "no guaranteed returns",
+# "is not guaranteed", "isn't guaranteed", "nothing is guaranteed" all pass) — same false-positive
+# fix-class as the risk-free lookahead; only a bare positive claim ("guaranteed profit") is flagged.
+NEGATED_ONLY = {"guaranteed": r"\b(no|not|never|without|nothing|cannot|none)\b|n't\b",
+                "personal recommendation": r"\b(not|no|never|nothing)\b|n't\b"}
 RR_OK = re.compile(r"^(T1 (below 1\.0x|\d+(\.\d+)?x); T2 (below 1\.0x|\d+(\.\d+)?x|\d+(\.\d+)?x .*)|No valid R:R - (excluded|setup excluded)).*$")
 RR_BAD = re.compile(r"(~\s*-\d)|(-\d+(\.\d+)?\s*/\s*-?\d+(\.\d+)?x)|(R:R[^.<]{0,30}[-−]\d)")
 QUALITY_LABELS = {"High quality", "Acceptable", "Low quality", "Management only", "No-trade"}

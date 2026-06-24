@@ -318,10 +318,16 @@ def main():
     if not opts["dry_run"] and not duplicate and not open_preview:
         LEDGER.parent.mkdir(parents=True, exist_ok=True)
         _backup_ledger()   # snapshot the append-only source of truth before mutating it
-        new_file = not LEDGER.exists()
+        # Header is (re)written when the ledger is missing OR empty OR header-less — a CONTENT check,
+        # not just existence, so a botched truncate/restore that left a header-less file never gets a
+        # data row appended without a header (which would corrupt every DictReader-based read).
+        needs_header = True
+        if LEDGER.exists() and LEDGER.stat().st_size > 0:
+            with open(LEDGER, newline="", encoding="utf-8") as _f:
+                needs_header = not _f.readline().startswith(LEDGER_COLS[0])
         with open(LEDGER, "a", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            if new_file:
+            if needs_header:
                 w.writerow(LEDGER_COLS)
             w.writerow(row)
 

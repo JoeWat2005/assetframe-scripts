@@ -35,17 +35,32 @@ class TestRiskFreeRate(unittest.TestCase):
 
 class TestSlugSafety(unittest.TestCase):
     def _safe(self, raw):
-        # mirrors scaffold_payload's ticker sanitization
-        return "".join(c for c in (raw or "").upper() if c.isalnum() or c in "._-") or "ASSET"
+        # mirrors scaffold_payload's ticker sanitization (strict ASCII-alphanumeric, pinned to name)
+        return "".join(c for c in (raw or "").upper() if c.isascii() and c.isalnum()) or "ASSET"
 
-    def test_unsafe_symbol_sanitized(self):
+    def test_unsafe_symbols_sanitized(self):
         self.assertEqual(self._safe("GC=F"), "GCF")
-        self.assertNotIn("=", self._safe("GC=F"))
-        self.assertNotIn("/", self._safe("XAU/USD"))
+        self.assertEqual(self._safe("XAU/USD"), "XAUUSD")
+        self.assertEqual(self._safe("BRK.B"), "BRKB")     # '.' dropped -> URL/key/parser-safe
+        for raw in ("GC=F", "XAU/USD", "BRK.B", "BTC-USD", "café"):
+            s = self._safe(raw)
+            for bad in "=/.- ":
+                self.assertNotIn(bad, s)
+            self.assertTrue(s.isascii())
 
     def test_clean_tickers_unchanged(self):
-        for t in ("BTC", "AAPL", "GBPUSD", "GOLD", "BRK.B"):
+        for t in ("BTC", "AAPL", "GBPUSD", "GOLD"):
             self.assertEqual(self._safe(t), t)
+
+
+class TestNegatedGuards(unittest.TestCase):
+    def test_guaranteed_negation_widened(self):
+        # the guard clears 'guaranteed' only when a negation token sits in the short preceding window
+        neg = mvp_report.NEGATED_ONLY["guaranteed"]
+        for ok in ("there are no ", "this is not ", "it isn't ", "nothing is ", "never "):
+            self.assertIsNotNone(re.search(neg, ok), f"{neg} should clear {ok!r}")
+        for bad in ("we offer a ", "this is a clean ", "here is "):
+            self.assertIsNone(re.search(neg, bad), f"{neg} should NOT clear {bad!r}")
 
 
 if __name__ == "__main__":

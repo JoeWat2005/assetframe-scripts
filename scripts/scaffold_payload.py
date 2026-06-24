@@ -335,9 +335,12 @@ def build_predictions_spec(by_id, brief, direction):
 def assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
              setups, ladder, ledger_levels, conf, asset_class, regime, pred_type,
              as_of_dt=None):
-    # slug/report_id/out_dir must be URL- and object-key-safe — a price symbol like "GC=F" must
-    # never leak an "=" (or "/", space, ...) into the edition id, the R2 key or the public URL.
-    ticker = "".join(c for c in (brief.get("ticker") or name).upper() if c.isalnum() or c in "._-") or "ASSET"
+    # The report identity (slug / report_id / out_dir / R2 key / scoring scope) is pinned to the
+    # asset NAME the scheduler passed (run_daily sends the asset ticker), NOT the AI/operator brief's
+    # `ticker` field — a divergent brief ticker would de-scope the asset from scoring and could leak
+    # an unsafe symbol like "GC=F". Kept strictly ASCII-alphanumeric so it is URL/object-key safe and
+    # the report_id parser (year = leading digits, ticker = last "-" segment) can never be broken.
+    ticker = "".join(c for c in (name or "").upper() if c.isascii() and c.isalnum()) or "ASSET"
     instrument = brief.get("instrument", name)
     report_date = (session.get("window_start_utc") or analysis.get("fetched_utc") or "")[:10]
     # report_id is the ledger/edition primary key (ON CONFLICT (report_id)) and the scorer's
@@ -757,7 +760,13 @@ def main():
         track_specs.append({"forecast_window": tf, "horizon": _horizon_for(tf),
                             "window_start_utc": ws, "window_end_utc": w["window_end_utc"]})
     hourly_csv = (analysis.get("files") or {}).get("hourly_csv", f"data/candles/{name}_hourly.csv")
-    last_price, last_ts = read_last_bar(hourly_csv)
+    try:
+        last_price, last_ts = read_last_bar(hourly_csv)
+    except BriefError:
+        # Hourly series empty (e.g. a feed degraded to daily-only) — fall back to the daily candles
+        # instead of aborting the whole asset. read_last_bar still dies if BOTH are empty.
+        daily_csv = (analysis.get("files") or {}).get("daily_csv", f"data/candles/{name}_daily.csv")
+        last_price, last_ts = read_last_bar(daily_csv)
 
     levels, by_id = build_levels(analysis, last_price)
     direction = taxonomy.validate_direction(brief.get("directional_view", "neutral"))
@@ -824,10 +833,19 @@ def main():
     # SEPARATE ledger row per horizon — and calibration is horizon-bucketed. The published edition
     # stays the canonical report_id; these files are scoring-only.
     extra = []
+    seen_ids = {predictions["report_id"]}
     for spec in track_specs[1:]:
         hz = spec["horizon"]
+        rid = _track_report_id(predictions["report_id"], hz)
+        if rid in seen_ids:
+            # two configured timeframes map to the same horizon bucket -> identical tagged report_id
+            # AND filename; keep the first, skip the rest (else they collide and the scorer drops one).
+            print(f"  warning: timeframe '{spec['forecast_window']}' shares horizon '{hz}' with an "
+                  f"earlier track ({rid}) — skipping the colliding track", file=sys.stderr)
+            continue
+        seen_ids.add(rid)
         tp = dict(predictions)
-        tp["report_id"] = _track_report_id(predictions["report_id"], hz)
+        tp["report_id"] = rid
         tp["window_start_utc"], tp["window_end_utc"] = spec["window_start_utc"], spec["window_end_utc"]
         tp["forecast_window"] = spec["forecast_window"]
         tp["taxonomy"] = taxonomy.build_taxonomy(pred_type, direction, hz, asset_class, regime)

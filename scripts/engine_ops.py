@@ -439,24 +439,33 @@ def _publish_chain(conn, request_id):
     content (the wipe foot-gun) and the Phase-2 hidden-on-insert keeps approval_required
     editions hidden. Honours cancellation between steps. cwd=ROOT so export's `--web .`
     and sync-db both resolve to <repo>/content. Returns (ok, errors, log_tail)."""
+    # publish (R2 upload) is NON-FATAL: a transient single-file R2 failure must NOT skip the Neon
+    # sync — the web reads editions/scored_results from Neon, and the R2 files can be re-pushed later
+    # with "Re-publish reports". export + sync are fatal (the sync is what makes a run visible).
     steps = [
-        ("export", [sys.executable, str(SCRIPTS / "export_content.py")]),
-        ("publish", [sys.executable, str(SCRIPTS / "publish.py")]),
-        ("sync", ["node", str(SCRIPTS / "sync-db.mjs")]),
+        ("export", [sys.executable, str(SCRIPTS / "export_content.py")], True),
+        ("publish", [sys.executable, str(SCRIPTS / "publish.py")], False),
+        ("sync", ["node", str(SCRIPTS / "sync-db.mjs")], True),
     ]
     logs = []
-    for name, cmd in steps:
+    warn = None
+    for name, cmd, fatal in steps:
         if request_id and is_cancel_requested(conn, request_id):
             return False, f"cancelled before {name}", "\n".join(logs)
         try:
             p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=900)
         except Exception as ex:
-            return False, f"{name} failed to launch: {ex}"[:400], "\n".join(logs)
+            if fatal:
+                return False, f"{name} failed to launch: {ex}"[:400], "\n".join(logs)
+            warn = f"{name} failed to launch: {ex}"[:240]
+            continue
         out = ((p.stdout or "") + (p.stderr or "")).strip()
         logs.append(f"=== {name} (rc={p.returncode}) ===\n{_tail(out, 2048)}")
         if p.returncode != 0:
-            return False, f"{name} exited {p.returncode}: {_tail(out, 240)}"[:400], "\n".join(logs)
-    return True, None, "\n".join(logs)
+            if fatal:
+                return False, f"{name} exited {p.returncode}: {_tail(out, 240)}"[:400], "\n".join(logs)
+            warn = f"publish exited {p.returncode} — some R2 uploads failed; synced anyway, use Re-publish reports"[:240]
+    return True, warn, "\n".join(logs)
 
 
 def run_and_record(conn, trigger, scope, request_id=None):
