@@ -46,7 +46,7 @@ SYNC_BACKTEST = SCRIPTS / "sync_backtest.py"   # pushes ledger/sim -> Neon backt
 LOCK_PATH = ROOT / ".run.lock"          # serialises run_daily across timer + poller
 # The sandbox working trees a backtest writes to (cleared by clear_sandbox; never the live trees).
 SANDBOX_DIRS = ["ledger/sim", "data/predictions/sim", "reports/sim"]
-MAX_BACKTEST_DAYS = 14                   # clamp the days-loop so a typo can't fan out the whole feed
+MAX_BACKTEST_DAYS = 90                   # up to ~3 months back; clamp so a typo can't fan out forever
 LOG_EXCERPT_BYTES = 24 * 1024           # last ~24KB of combined stdout/stderr (richer dashboard log)
 
 

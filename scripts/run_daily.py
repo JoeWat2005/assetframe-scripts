@@ -267,7 +267,10 @@ def author_brief_step(asset, brief_path):
             cmd += ["--social", _rel(social)]
         if guidance:
             cmd += ["--guidance", guidance]
-        if not asset.get("include_news", True):   # per-asset technical-focus (no news research)
+        # Technical-focus when the asset opts out of news — AND always in a SANDBOX backtest: news /
+        # web-search would pull TODAY's information into a past-dated report (look-ahead), so a
+        # backtest is only honest without it. (The price/technicals are already trimmed to the as-of.)
+        if not asset.get("include_news", True) or os.environ.get("ASSETFRAME_SANDBOX") == "1":
             cmd += ["--no-news"]
         ok, rc, out, err = _run_rc(cmd, timeout=WRITER_TIMEOUT)
         res["token_cost"]["writer"].append(_parse_last_json(out) or {"error": (err or "")[-160:]})
