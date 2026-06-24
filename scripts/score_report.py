@@ -41,7 +41,7 @@ Once the ledger holds >=10 reports the summary gains a `calibration` block: real
 hit rate by stated-confidence bucket (<=60 / 61-75 / >75) — stated confidence should
 track realized hit rate; if it doesn't, the confidence rubric needs recalibrating.
 """
-import csv, json, sys
+import csv, json, os, sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -55,7 +55,11 @@ except Exception:                       # standalone fallback
             return None
         return "<=60" if c <= 60 else ("61-75" if c <= 75 else ">75")
 
-LEDGER = Path("ledger/outcome_ledger.csv")
+# SANDBOX isolation: ASSETFRAME_SANDBOX=1 redirects the ledger (and its backups dir,
+# which follows LEDGER.parent) under ledger/sim/ so a backtest never touches the live
+# track record. Env UNSET -> the live path, byte-identical to before.
+LEDGER = Path("ledger/sim/outcome_ledger.csv" if os.environ.get("ASSETFRAME_SANDBOX") == "1"
+              else "ledger/outcome_ledger.csv")
 # The first 13 columns are the original schema (never reordered - append-only).
 # The trailing columns (Confidence V2 + prediction taxonomy) are additive; older
 # rows simply lack them and read back as "" via DictReader.

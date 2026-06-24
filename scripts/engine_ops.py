@@ -468,7 +468,7 @@ def _publish_chain(conn, request_id):
     return True, warn, "\n".join(logs)
 
 
-def run_and_record(conn, trigger, scope, request_id=None):
+def run_and_record(conn, trigger, scope, request_id=None, sandbox=False):
     """Run run_daily.py for `scope` under the run lock; record everything to Neon.
 
     Steps:
@@ -483,12 +483,21 @@ def run_and_record(conn, trigger, scope, request_id=None):
          generation_requests row if request_id (status/run_id/error/finished_at), and
          clear engine_state.current_run_id.
 
-    Never raises. Returns the run id. trigger in ('schedule','manual'); status in
+    sandbox=True runs an ISOLATED backtest: run_daily.py is invoked with --sandbox (so it
+    sets ASSETFRAME_SANDBOX=1 for itself and every child — writes go to ledger/sim,
+    data/predictions/sim, reports/sim, and the live calibration map is never rebuilt), and
+    the publish chain (export/publish/sync) is SKIPPED entirely so nothing reaches R2/Neon
+    editions. The run is tagged (results['sandbox']=True) so it is distinguishable in
+    engine_runs.
+
+    Never raises. Returns the run id. trigger in ('schedule','manual','backtest'); status in
     ('done','failed','cancelled').
     """
     run_id = _new_run_id(trigger, request_id)
     scope_json = scope if isinstance(scope, (dict, list)) else (scope or {})
     args = scope_to_run_args(scope_json)
+    if sandbox:
+        args = args + ["--sandbox"]
 
     # 1. create the run row + claim current_run_id (best-effort; never fatal).
     try:
@@ -515,7 +524,11 @@ def run_and_record(conn, trigger, scope, request_id=None):
             # run_daily only GENERATES locally. On success, publish inside the SAME lock so
             # generate+publish is one atomic unit: export -> R2 -> Neon (hidden). Without
             # this the editions would never reach R2/the database for admin approval.
-            if status == "done":
+            # SANDBOX: a backtest must NOT touch published editions/R2/Neon, so we skip the
+            # publish chain entirely and tag the run so it is distinguishable in engine_runs.
+            if sandbox:
+                results = {**(results or {}), "sandbox": True, "publish": "skipped (sandbox)"}
+            elif status == "done":
                 pub_ok, pub_err, pub_log = _publish_chain(conn, request_id)
                 log_excerpt = _tail((log_excerpt or "") + "\n\n" + pub_log)
                 results = {**(results or {}), "publish": "ok" if pub_ok else "failed"}
@@ -1168,6 +1181,35 @@ def _cmd_clear_wake(conn, args):
     return True, "cleared the Upstash wake flag", None, False
 
 
+def _cmd_run_backtest(conn, args):
+    """Run an ISOLATED backtest: generate + score one or more assets AS-OF a closed window,
+    writing ONLY to the sim/ subtrees (ledger/sim, data/predictions/sim, reports/sim) and
+    NEVER publishing (no export/publish/sync) or rebuilding the live calibration map.
+
+    args {assets: [asset_id...], as_of: "YYYY-MM-DD HH:MM"}. A backtest REQUIRES a closed
+    window (as_of) and at least one asset — without a past as_of the prediction window
+    wouldn't be closed (nothing to score), and an unscoped backtest would generate the whole
+    universe into sim, which is never what a targeted test wants. Either missing -> clear error.
+
+    Delegates to run_and_record(trigger='backtest', sandbox=True), which appends --sandbox to
+    the run_daily invocation and skips the publish chain. The scope dict carries assets + as_of
+    exactly like the manual/scheduled path (scope_to_run_args wires --asset/--as-of/--mode)."""
+    assets = [str(a).strip().lower() for a in (args.get("assets") or []) if a is not None and str(a).strip()]
+    if not assets:
+        return False, "run_backtest requires at least one asset (args.assets)", None, False
+    as_of = args.get("as_of")
+    if not (isinstance(as_of, str) and as_of.strip()):
+        return False, "run_backtest requires a closed window (args.as_of 'YYYY-MM-DD HH:MM')", None, False
+    try:
+        datetime.strptime(as_of.strip()[:16], "%Y-%m-%d %H:%M")
+    except ValueError:
+        return False, f"run_backtest as_of {as_of!r} must be 'YYYY-MM-DD HH:MM'", None, False
+    scope = {"assets": assets, "as_of": as_of.strip()[:16]}
+    run_id = run_and_record(conn, trigger="backtest", scope=scope, sandbox=True)
+    return True, (f"backtest run {run_id} complete (sandbox: ledger/sim + reports/sim, "
+                  f"no publish) — assets={assets} as_of={scope['as_of']}"), None, False
+
+
 _COMMAND_HANDLERS = {
     "restart_poller": _cmd_restart_poller,
     "pull_latest": _cmd_pull_latest,
@@ -1182,6 +1224,7 @@ _COMMAND_HANDLERS = {
     "service_check": _cmd_service_check,
     "clear_r2": _cmd_clear_r2,
     "clear_wake": _cmd_clear_wake,
+    "run_backtest": _cmd_run_backtest,
 }
 
 # Canonical allow-list (the web keeps its own copy for defence in depth; this is the boundary).

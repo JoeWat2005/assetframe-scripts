@@ -32,6 +32,13 @@ Usage:
   python scripts/run_daily.py [--universe config/assets.json] [--asset <id>]
         [--asset-class fx] [--mode dry_run|score_only|generate_only|production]
         [--date YYYY-MM-DD] [--as-of "YYYY-MM-DD HH:MM"] [--workers 4] [--no-render]
+        [--sandbox]
+
+--sandbox isolates a backtest from production: ASSETFRAME_SANDBOX=1 is set for the run
+(and inherited by every child subprocess), redirecting persistent writes to sim/ subtrees
+(ledger/sim, data/predictions/sim, reports/sim) and SKIPPING the calibration/research/
+ledger_db memory refresh. The live ledger + calibration map are never rebuilt from a
+sandbox run. (Publish is skipped by the caller — engine_ops.run_and_record — not here.)
 """
 import json
 import os
@@ -106,7 +113,8 @@ def _parse_last_json(text):
 
 def parse_args(argv):
     o = {"universe": "config/assets.json", "asset": [], "asset_class": None,
-         "mode": "dry_run", "date": None, "as_of": None, "workers": 4, "no_render": False}
+         "mode": "dry_run", "date": None, "as_of": None, "workers": 4, "no_render": False,
+         "sandbox": False}
     keys = {"--universe": "universe", "--asset-class": "asset_class",
             "--mode": "mode", "--date": "date", "--as-of": "as_of", "--workers": "workers"}
     i = 0
@@ -114,6 +122,8 @@ def parse_args(argv):
         a = argv[i]
         if a == "--no-render":
             o["no_render"] = True
+        elif a == "--sandbox":              # isolate writes under sim/ + skip publish/calibration
+            o["sandbox"] = True
         elif a == "--asset":               # repeatable — a multi-asset scope keeps EVERY id
             i += 1
             if i >= len(argv):
@@ -195,13 +205,19 @@ def score_step(now, tickers=None):
             errors.append(rec)
         else:
             scored.append(rec)
-    # refresh ledger-derived memory (cheap; best-effort)
-    refresh = {}
-    for label, cmd in (("calibrate", ["scripts/calibrate.py"]),
-                       ("research_memory", ["scripts/research_memory.py"]),
-                       ("ledger_db", ["scripts/ledger_db.py", "rebuild"])):
-        ok, _o, err = _run(cmd, timeout=60)
-        refresh[label] = "ok" if ok else f"failed: {(err or '')[-120:]}"
+    # refresh ledger-derived memory (cheap; best-effort). SANDBOX: NEVER rebuild the live
+    # calibration_map / research_memory / ledger_db from a sandbox ledger — a backtest grades
+    # into ledger/sim and must not bleed into the production memory the live confidence engine
+    # reads. So skip the refresh entirely under ASSETFRAME_SANDBOX=1.
+    if os.environ.get("ASSETFRAME_SANDBOX") == "1":
+        refresh = {"skipped": "sandbox"}
+    else:
+        refresh = {}
+        for label, cmd in (("calibrate", ["scripts/calibrate.py"]),
+                           ("research_memory", ["scripts/research_memory.py"]),
+                           ("ledger_db", ["scripts/ledger_db.py", "rebuild"])):
+            ok, _o, err = _run(cmd, timeout=60)
+            refresh[label] = "ok" if ok else f"failed: {(err or '')[-120:]}"
     return {"scored": scored, "skipped": skipped, "errors": errors, "memory_refresh": refresh}
 
 
@@ -561,6 +577,17 @@ def _prune_old_dated_dirs(keep_days, today):
 
 def main():
     o = parse_args(sys.argv[1:])
+    # SANDBOX must be the FIRST thing armed — BEFORE any scoring/generation/subprocess — so
+    # every child (intraday/scaffold/score_report/...) inherits ASSETFRAME_SANDBOX=1 and
+    # redirects its persistent writes to the sim/ subtrees. We also repoint PRED_DIR (the
+    # scorer's scan dir) at data/predictions/sim so score_step grades ONLY sandbox files,
+    # and pre-create the sim/ roots so the first write never races a missing dir.
+    if o["sandbox"]:
+        global PRED_DIR
+        os.environ["ASSETFRAME_SANDBOX"] = "1"
+        PRED_DIR = ROOT / "data" / "predictions" / "sim"
+        (ROOT / "ledger" / "sim").mkdir(parents=True, exist_ok=True)
+        PRED_DIR.mkdir(parents=True, exist_ok=True)
     now = resolve_now(o)
     run_date = (now.astimezone(LONDON) if LONDON else now).strftime("%Y-%m-%d")
     run_id = f"daily-{run_date}"
@@ -579,6 +606,8 @@ def main():
                 "generated_at_utc": now.strftime("%Y-%m-%d %H:%M"), "timezone": "Europe/London",
                 "universe": o["universe"], "assets_selected": len(assets),
                 "assets_due": len(due_assets), "plan": plan}
+    if o["sandbox"]:
+        manifest["sandbox"] = True
 
     print(f"[{run_id}] mode={o['mode']} @ {now.strftime('%Y-%m-%d %H:%M')} UTC | "
           f"selected={len(assets)} due={len(due_assets)} "

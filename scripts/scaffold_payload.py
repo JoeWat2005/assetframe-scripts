@@ -34,7 +34,7 @@ Usage:
 --check validates the brief + emitted payload and prints the would-be confidence
 without writing (still writes nothing). Exit 2 on a brief/validation error.
 """
-import csv, json, sys
+import csv, json, os, sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -439,7 +439,11 @@ def assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
         "subtitle": brief.get("subtitle", f"{meta['venue']} - {meta['prediction_window_start_report_tz']}"
                     f" -> {meta['prediction_window_end_report_tz']}"),
         "status": brief["status"], "risk": brief["risk"], "confidence": conf["published"],
-        "out_dir": f"reports/{report_date}/{ticker}",
+        # SANDBOX: route the rendered edition under reports/sim/ so a backtest never writes
+        # into a live published edition folder. Env UNSET -> the live reports/ path.
+        "out_dir": (f"reports/sim/{report_date}/{ticker}"
+                    if os.environ.get("ASSETFRAME_SANDBOX") == "1"
+                    else f"reports/{report_date}/{ticker}"),
         "confidence_breakdown": conf,
         "canonical": canonical, "meta": meta, "free": free, "pro": pro,
     }
@@ -816,7 +820,14 @@ def main():
     }
 
     out = Path(o["out"] or f"data/payloads/{name}_af_payload.json")
-    pred_out = Path(o["predictions"] or f"data/predictions/{name}_predictions.json")
+    # SANDBOX: default the predictions base dir to data/predictions/sim so a backtest's
+    # prediction files (and the per-timeframe tracks written under pred_out.parent) never
+    # land in the live data/predictions/ scope the scorer reads. An explicit --predictions
+    # always wins; env UNSET -> the live path. Byte-identical when neither is set.
+    _pred_default = (f"data/predictions/sim/{name}_predictions.json"
+                     if os.environ.get("ASSETFRAME_SANDBOX") == "1"
+                     else f"data/predictions/{name}_predictions.json")
+    pred_out = Path(o["predictions"] or _pred_default)
     summary = {"name": name, "confidence": conf["published"], "raw": conf["raw"],
                "band": conf["band"], "caps": conf["caps_applied"], "pred_type": pred_type,
                "levels": len(levels), "setups": len(setups), "predictions": len(preds),
