@@ -1351,8 +1351,10 @@ def _cmd_run_backtest(conn, args):
 def _cmd_clear_sandbox(conn, args):
     """Reset the box's SANDBOX working trees so the admin can start a fresh backtest: empties
     ledger/sim, data/predictions/sim, reports/sim (and only those — the live ledger/reports/data
-    are NEVER touched). Mirrors _cmd_clear_reports' safe per-dir clearing and is held under the run
-    lock so it never deletes mid-backtest. The Neon backtest_results table is cleared separately."""
+    are NEVER touched). It removes EVERY child of each dir (files and subdirs alike, via rmtree), so
+    the data/predictions/sim/scored/ per-prediction sidecars are wiped too. Mirrors _cmd_clear_reports'
+    safe per-dir clearing and is held under the run lock so it never deletes mid-backtest. The Neon
+    backtest_results / backtest_predictions tables are cleared separately."""
     import shutil
     cleared = []
     try:

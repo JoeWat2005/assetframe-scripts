@@ -521,5 +521,240 @@ class ClearSandboxHandler(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+# --------------------------------------------------- score_report per-prediction sidecar
+class _Chdir:
+    """Context manager: chdir into `d` for the block, restore cwd after (score_report's LEDGER and
+    SCORED_DIR are relative paths, so we run it inside a throwaway temp tree)."""
+    def __init__(self, d):
+        self.d = str(d)
+        self._old = None
+
+    def __enter__(self):
+        self._old = os.getcwd()
+        os.chdir(self.d)
+        return self
+
+    def __exit__(self, *exc):
+        os.chdir(self._old)
+        return False
+
+
+# A closed window (well in the past) with a tiny hourly CSV whose final bar settles ABOVE 100,
+# inside [90,110], does NOT close below 95, and a "no_close_above_after_touch" whose touch (120) is
+# never reached -> P1=Y, P2=Y, P3=N, P4=NT (never-triggered), manual P5 stays MANUAL. Lets the
+# sidecar exercise every outcome shape (Y/N/NT/MANUAL).
+_PRED_FIXTURE = {
+    "report_id": "AF-202001011200-TEST", "instrument": "TEST/USD", "symbol": "TEST=X",
+    "view": "Constructive", "confidence": 64,
+    "window_start_utc": "2020-01-01 12:00", "window_end_utc": "2020-01-01 14:00",
+    "hourly_csv": "data/candles/TEST_hourly.csv",
+    "predictions": [
+        {"id": "P1", "type": "close_above", "level": 100.0, "expect": True},
+        {"id": "P2", "type": "range_inside", "lo": 90.0, "hi": 110.0, "expect": True},
+        {"id": "P3", "type": "close_below", "level": 95.0, "expect": True},
+        {"id": "P4", "type": "no_close_above_after_touch", "touch": 120.0, "level": 121.0,
+         "expect": True},
+        {"id": "P5", "type": "manual", "note": "GDP <= -0.3% then a slide within 2h"},
+    ],
+}
+_HOURLY_CSV = (
+    "time,open,high,low,close\n"
+    "2020-01-01 12:00,100.0,105.0,99.0,102.0\n"
+    "2020-01-01 13:00,102.0,108.0,98.0,104.0\n"
+)
+
+
+def _seed_score_tree(d):
+    """Write the predictions file + hourly CSV into temp tree `d`; return the predictions path."""
+    (d / "data" / "candles").mkdir(parents=True, exist_ok=True)
+    (d / "data" / "candles" / "TEST_hourly.csv").write_text(_HOURLY_CSV, encoding="utf-8")
+    pred_path = d / "predictions.json"
+    import json as _json
+    pred_path.write_text(_json.dumps(_PRED_FIXTURE), encoding="utf-8")
+    return pred_path
+
+
+def _run_score(d, pred_path, extra_argv=None):
+    """Reimport score_report under the current env, run main() inside temp tree `d`."""
+    import json as _json
+    S = _reload_score_report()
+    argv = ["score_report.py", str(pred_path)] + (extra_argv or [])
+    with _Chdir(d), mock.patch.object(sys, "argv", argv):
+        try:
+            S.main()
+        except SystemExit:
+            pass
+    scored = d / "data" / "predictions" / "sim" / "scored" / "AF-202001011200-TEST.json"
+    return (_json.loads(scored.read_text(encoding="utf-8")) if scored.exists() else None), S
+
+
+class ScoreReportSidecar(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        import shutil
+        self._tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(self._tmp, ignore_errors=True))
+        self.pred = _seed_score_tree(self._tmp)
+
+    def test_sidecar_written_under_sandbox(self):
+        with mock.patch.dict(os.environ, {"ASSETFRAME_SANDBOX": "1"}, clear=False):
+            entries, _S = _run_score(self._tmp, self.pred)
+        self.assertIsNotNone(entries, "sidecar JSON should be written under sandbox")
+        self.assertEqual(len(entries), 5)
+        # ordered + 0-based sort
+        self.assertEqual([e["pred_id"] for e in entries], ["P1", "P2", "P3", "P4", "P5"])
+        self.assertEqual([e["sort"] for e in entries], [0, 1, 2, 3, 4])
+        by_id = {e["pred_id"]: e for e in entries}
+        # outcomes from the graded results
+        self.assertEqual(by_id["P1"]["outcome"], "Y")
+        self.assertEqual(by_id["P2"]["outcome"], "Y")
+        self.assertEqual(by_id["P3"]["outcome"], "N")
+        self.assertEqual(by_id["P4"]["outcome"], "NT")
+        # manual shape: flag True, outcome MANUAL, ptext comes from the note
+        self.assertTrue(by_id["P5"]["manual"])
+        self.assertEqual(by_id["P5"]["outcome"], "MANUAL")
+        self.assertIn("GDP", by_id["P5"]["ptext"])
+        self.assertEqual(by_id["P5"]["ptype"], "manual")
+        # auto-graded ones are not flagged manual
+        self.assertFalse(by_id["P1"]["manual"])
+
+    def test_sidecar_not_written_in_production(self):
+        env = {k: v for k, v in os.environ.items() if k != "ASSETFRAME_SANDBOX"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            entries, _S = _run_score(self._tmp, self.pred)
+        # production: the (sandbox) scored sidecar dir must not exist at all.
+        self.assertIsNone(entries)
+        self.assertFalse((self._tmp / "data" / "predictions" / "sim" / "scored").exists())
+
+    def test_sidecar_not_written_on_dry_run(self):
+        # --dry-run writes no ledger row, so it must write no sidecar even under sandbox.
+        with mock.patch.dict(os.environ, {"ASSETFRAME_SANDBOX": "1"}, clear=False):
+            entries, _S = _run_score(self._tmp, self.pred, ["--dry-run"])
+        self.assertIsNone(entries)
+
+    def test_resolved_manual_outcome_flows_through(self):
+        # an admin-resolved manual (--manual P5=Y) should land as outcome Y, still flagged manual.
+        with mock.patch.dict(os.environ, {"ASSETFRAME_SANDBOX": "1"}, clear=False):
+            entries, _S = _run_score(self._tmp, self.pred, ["--manual", "P5=Y"])
+        p5 = {e["pred_id"]: e for e in entries}["P5"]
+        self.assertEqual(p5["outcome"], "Y")
+        self.assertTrue(p5["manual"])
+
+    @classmethod
+    def tearDownClass(cls):
+        env = {k: v for k, v in os.environ.items() if k != "ASSETFRAME_SANDBOX"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            _reload_score_report()
+
+
+# --------------------------------------------------- sync_backtest per-prediction sync
+class SyncBacktestPredictions(unittest.TestCase):
+    def setUp(self):
+        import sync_backtest
+        self.SB = sync_backtest
+
+    def test_map_pred_shape(self):
+        t = self.SB.map_pred("AF-202001011200-TEST",
+                              {"pred_id": "P1", "ptype": "close_above", "ptext": "settles above 100",
+                               "manual": False, "sort": 0, "outcome": "Y"})
+        # PRED_COLS order: report_id, pred_id, ptype, ptext, manual, outcome, sort
+        self.assertEqual(t[0], "AF-202001011200-TEST")
+        self.assertEqual(t[1], "P1")
+        self.assertEqual(t[2], "close_above")
+        self.assertEqual(t[3], "settles above 100")
+        self.assertIs(t[4], False)
+        self.assertEqual(t[5], "Y")
+        self.assertEqual(t[6], 0)
+
+    def test_map_pred_manual_and_null_outcome(self):
+        t = self.SB.map_pred("R1", {"pred_id": "P5", "ptype": "manual", "ptext": "note here",
+                                    "manual": True, "sort": 4, "outcome": None})
+        self.assertIs(t[4], True)
+        self.assertIsNone(t[5])     # unresolved -> null outcome preserved as None
+
+    def test_map_pred_without_pred_id_skipped(self):
+        self.assertIsNone(self.SB.map_pred("R1", {"ptype": "manual"}))
+        self.assertIsNone(self.SB.map_pred("R1", {"pred_id": "", "ptype": "x"}))
+
+    def test_read_pred_rows_from_scored_dir(self):
+        import tempfile
+        import shutil
+        import json as _json
+        d = Path(tempfile.mkdtemp())
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "AF-202001011200-TEST.json").write_text(_json.dumps([
+                {"pred_id": "P1", "ptype": "close_above", "ptext": "above 100",
+                 "manual": False, "sort": 0, "outcome": "Y"},
+                {"pred_id": "P5", "ptype": "manual", "ptext": "note", "manual": True,
+                 "sort": 4, "outcome": "MANUAL"},
+            ]), encoding="utf-8")
+            rows = self.SB.read_pred_rows(d)
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0][0], "AF-202001011200-TEST")  # report_id from filename stem
+            self.assertEqual(rows[0][1], "P1")
+            self.assertEqual(rows[1][1], "P5")
+            self.assertIs(rows[1][4], True)
+            self.assertEqual(rows[1][5], "MANUAL")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_read_pred_rows_missing_dir_is_empty(self):
+        self.assertEqual(self.SB.read_pred_rows(Path("does/not/exist")), [])
+
+    def test_read_pred_rows_skips_malformed_file(self):
+        import tempfile
+        import shutil
+        d = Path(tempfile.mkdtemp())
+        try:
+            (d / "bad.json").write_text("{ not valid json", encoding="utf-8")
+            (d / "notalist.json").write_text('{"pred_id":"P1"}', encoding="utf-8")
+            self.assertEqual(self.SB.read_pred_rows(d), [])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_upsert_sql_preserves_manual_outcome_via_coalesce(self):
+        # the COALESCE on the existing outcome is the guard that keeps an admin-entered manual grade.
+        sql = self.SB._PRED_UPSERT_SQL.lower()
+        self.assertIn("on conflict (report_id, pred_id) do update set", sql)
+        self.assertIn("outcome = coalesce(backtest_predictions.outcome, excluded.outcome)", sql)
+        # the shape fields ARE refreshed from the sidecar.
+        for col in ("ptype = excluded.ptype", "ptext = excluded.ptext",
+                    "manual = excluded.manual", "sort = excluded.sort"):
+            self.assertIn(col, sql)
+
+    def test_sync_predictions_empty_is_clean_no_op(self):
+        # no scored/ dir -> 0 and the DB is never connected.
+        with mock.patch.object(self.SB, "read_pred_rows", return_value=[]), \
+             mock.patch.object(self.SB.engine_ops, "connect") as conn:
+            self.assertEqual(self.SB.sync_predictions(), 0)
+        conn.assert_not_called()
+
+    def test_sync_predictions_upserts_each_row(self):
+        rows = [("R1", "P1", "close_above", "x", False, "Y", 0),
+                ("R1", "P2", "manual", "n", True, None, 1)]
+
+        class _Conn:
+            def __init__(self):
+                self.calls = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def execute(self, sql, params=None):
+                self.calls.append((sql, params))
+
+        c = _Conn()
+        with mock.patch.object(self.SB, "read_pred_rows", return_value=rows), \
+             mock.patch.object(self.SB.engine_ops, "connect", return_value=c):
+            n = self.SB.sync_predictions()
+        self.assertEqual(n, 2)
+        self.assertEqual(len(c.calls), 2)
+        self.assertTrue(all("backtest_predictions" in s.lower() for s, _ in c.calls))
+
+
 if __name__ == "__main__":
     unittest.main()

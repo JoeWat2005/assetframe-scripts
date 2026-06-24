@@ -58,8 +58,14 @@ except Exception:                       # standalone fallback
 # SANDBOX isolation: ASSETFRAME_SANDBOX=1 redirects the ledger (and its backups dir,
 # which follows LEDGER.parent) under ledger/sim/ so a backtest never touches the live
 # track record. Env UNSET -> the live path, byte-identical to before.
-LEDGER = Path("ledger/sim/outcome_ledger.csv" if os.environ.get("ASSETFRAME_SANDBOX") == "1"
+SANDBOX = os.environ.get("ASSETFRAME_SANDBOX") == "1"
+LEDGER = Path("ledger/sim/outcome_ledger.csv" if SANDBOX
               else "ledger/outcome_ledger.csv")
+# SANDBOX-only per-prediction sidecar: when a backtest writes a ledger row, it ALSO drops a
+# data/predictions/sim/scored/<report_id>.json list (one entry per prediction, in order) so the
+# admin console can show the full graded prediction list. sync_backtest.py upserts these into the
+# Neon backtest_predictions table. Never written in production (gated on SANDBOX + a real write).
+SCORED_DIR = Path("data/predictions/sim/scored")
 # The first 13 columns are the original schema (never reordered - append-only).
 # The trailing columns (Confidence V2 + prediction taxonomy) are additive; older
 # rows simply lack them and read back as "" via DictReader.
@@ -246,6 +252,54 @@ def _backup_ledger(keep=5):
         pass
 
 
+def _prediction_text(q):
+    """Human-readable text for one prediction, for the sidecar's ptext column.
+    A manual prediction has no auto-grade — its text is the analyst-facing note/criteria.
+    Auto-graded predictions fall back to an explicit `text` field if present, else a compact
+    rendering of the typed condition so the admin always sees *something* meaningful."""
+    if q.get("type") == "manual":
+        return str(q.get("note") or q.get("criteria") or "").strip()
+    txt = q.get("text")
+    if txt:
+        return str(txt).strip()
+    # No explicit text — render the typed condition compactly (best-effort, never raises).
+    typ = q.get("type", "")
+    bits = [str(typ)]
+    for k in ("level", "lo", "hi", "touch"):
+        if q.get(k) is not None:
+            bits.append(f"{k}={q[k]}")
+    if q.get("expect") is not None:
+        bits.append(f"expect={q['expect']}")
+    return " ".join(bits).strip()
+
+
+def _write_scored_sidecar(report_id, predictions, results):
+    """SANDBOX-only: write data/predictions/sim/scored/<report_id>.json — a JSON list with one
+    entry per prediction IN ORDER. Each entry: {pred_id, ptype, ptext, manual, sort, outcome}.
+    `outcome` is the graded verdict from `results` (Y/N/NT), or MANUAL for an unresolved manual one
+    (and any manual that the graded results left as None/MANUAL). Best-effort: never raises into the
+    scoring path. report_id is basename'd as a defence against any path-unsafe character."""
+    safe_id = Path(str(report_id)).name or "report"
+    entries = []
+    for i, q in enumerate(predictions):
+        pid = q.get("id")
+        is_manual = q.get("type") == "manual"
+        outcome = results.get(pid)
+        if is_manual and outcome in (None, "MANUAL"):
+            outcome = "MANUAL"   # unresolved manual -> MANUAL (admin grades it later)
+        entries.append({
+            "pred_id": pid,
+            "ptype": q.get("type"),
+            "ptext": _prediction_text(q),
+            "manual": is_manual,
+            "sort": i,
+            "outcome": outcome,
+        })
+    SCORED_DIR.mkdir(parents=True, exist_ok=True)
+    (SCORED_DIR / f"{safe_id}.json").write_text(
+        json.dumps(entries, indent=1), encoding="utf-8")
+
+
 def main():
     if len(sys.argv) < 2:
         print("usage: python scripts/score_report.py <predictions.json> [--hourly csv] "
@@ -334,6 +388,11 @@ def main():
             if needs_header:
                 w.writerow(LEDGER_COLS)
             w.writerow(row)
+        # SANDBOX-only: now that a real ledger row was written (not dry-run / preview / duplicate),
+        # drop the per-prediction sidecar so the admin console can show the full graded list. This
+        # is the ONLY production-vs-sandbox behavioural difference and is gated on SANDBOX.
+        if SANDBOX:
+            _write_scored_sidecar(p["report_id"], p["predictions"], results)
 
     # cumulative ledger summary (dry-run: simulate this row in memory instead)
     rows = []
