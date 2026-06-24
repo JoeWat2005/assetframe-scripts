@@ -705,7 +705,10 @@ def main():
     # sandbox "Score now". (Live runs keep the deliberate generate-then-Score-now two-step.)
     if o["sandbox"] and o["mode"] in ("generate_only", "production"):
         print("scoring the backtest's freshly-generated closed windows...")
-        post = score_step(now, {a["ticker"] for a in assets})
+        # Grade against the REAL wall-clock now, NOT the backdated `now`: a backtest's window closes
+        # AFTER its as-of moment, so relative to the as-of it looks "still open"; relative to today it
+        # has already closed — which is the entire point of backdating. (Live runs use `now` above.)
+        post = score_step(datetime.now(timezone.utc), {a["ticker"] for a in assets})
         prev = manifest.get("score") or {"scored": [], "skipped": [], "errors": []}
         manifest["score"] = {
             "scored": (prev.get("scored") or []) + post.get("scored", []),
