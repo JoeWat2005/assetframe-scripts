@@ -33,7 +33,7 @@ import subprocess
 import sys
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg
@@ -42,7 +42,11 @@ from psycopg.rows import dict_row
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 RUN_DAILY = SCRIPTS / "run_daily.py"
+SYNC_BACKTEST = SCRIPTS / "sync_backtest.py"   # pushes ledger/sim -> Neon backtest_results
 LOCK_PATH = ROOT / ".run.lock"          # serialises run_daily across timer + poller
+# The sandbox working trees a backtest writes to (cleared by clear_sandbox; never the live trees).
+SANDBOX_DIRS = ["ledger/sim", "data/predictions/sim", "reports/sim"]
+MAX_BACKTEST_DAYS = 14                   # clamp the days-loop so a typo can't fan out the whole feed
 LOG_EXCERPT_BYTES = 24 * 1024           # last ~24KB of combined stdout/stderr (richer dashboard log)
 
 
@@ -556,6 +560,129 @@ def run_and_record(conn, trigger, scope, request_id=None, sandbox=False):
     except Exception:
         pass
     return run_id
+
+
+def _backdated_as_of(as_of, k):
+    """Return the as_of moment moved BACK by k calendar days, same HH:MM, as 'YYYY-MM-DD HH:MM'.
+    Day 0 is as_of itself; day k = as_of minus k days. The report_id embeds HHMM+date, so each
+    day is a distinct backdated report (AF-YYYYMMDDHHMM-TICKER) and they never collide."""
+    base = datetime.strptime(as_of.strip()[:16], "%Y-%m-%d %H:%M")
+    return (base - timedelta(days=k)).strftime("%Y-%m-%d %H:%M")
+
+
+def run_backtest_batch(conn, assets, as_of, days=1):
+    """Run a MULTI-DAY sandbox backtest: for each of `days` consecutive days counting BACK from
+    as_of (day 0 = as_of, day k = as_of - k days, SAME HH:MM), generate + score the given assets
+    AS-OF that closed window — every day a distinct backdated report (report_id embeds HHMM+date,
+    so days never collide). ALL days run under ONE run lock, all sandboxed (--sandbox, no publish,
+    no live calibration). After every day completes, sync_backtest.py pushes ledger/sim ->
+    backtest_results once. ONE engine_runs row (trigger 'backtest') summarises the whole batch.
+
+    `days` is clamped to 1..MAX_BACKTEST_DAYS. The single-day path (days=1) runs exactly one day,
+    so run_and_record's behaviour for an ordinary single-day backtest is preserved.
+
+    Never raises. Returns the run id. Validation (>=1 asset, valid closed as_of) is the caller's
+    (_cmd_run_backtest); this records 'failed' if those are somehow violated."""
+    assets = [str(a).strip().lower() for a in (assets or []) if a is not None and str(a).strip()]
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = 1
+    days = max(1, min(MAX_BACKTEST_DAYS, days))
+
+    run_id = f"backtest-{_utcnow().strftime('%Y%m%dT%H%M%SZ')}"
+    scope = {"assets": assets, "as_of": (as_of or "").strip()[:16], "days": days}
+
+    # validate up front so a bad batch is recorded cleanly, not run.
+    bad = None
+    if not assets:
+        bad = "run_backtest requires at least one asset"
+    else:
+        try:
+            datetime.strptime(scope["as_of"], "%Y-%m-%d %H:%M")
+        except ValueError:
+            bad = f"run_backtest as_of {as_of!r} must be 'YYYY-MM-DD HH:MM'"
+
+    try:
+        conn.execute(
+            "INSERT INTO engine_runs (id, trigger, scope, status, started_at) "
+            "VALUES (%s, 'backtest', %s, 'running', now()) "
+            "ON CONFLICT (id) DO UPDATE SET trigger = 'backtest', scope = excluded.scope, "
+            "  status = 'running', started_at = now(), results = NULL, errors = NULL, "
+            "  log_excerpt = NULL, finished_at = NULL",
+            (run_id, json.dumps(scope)))
+        set_current_run(conn, run_id)
+    except Exception:
+        return run_id   # can't even create the run row -> nothing else we can record to
+
+    status = "failed"
+    errors = bad
+    log_excerpt = bad or ""
+    day_results = []
+    total_scored = 0
+    if bad is None:
+        try:
+            with _FileLock(LOCK_PATH, blocking=False) as _lk:   # noqa: F841 — one lock for ALL days
+                logs = []
+                day_status = "done"
+                for k in range(days):
+                    day_as_of = _backdated_as_of(scope["as_of"], k)
+                    day_scope = {"assets": assets, "as_of": day_as_of}
+                    args = scope_to_run_args(day_scope) + ["--sandbox"]
+                    st, res, err, log = _exec_run_daily(conn, args, None)
+                    sc = (res or {}).get("score") or {}
+                    scored_n = sc.get("scored") if isinstance(sc.get("scored"), int) else 0
+                    total_scored += int(scored_n or 0)
+                    day_results.append({
+                        "day": k, "as_of": day_as_of, "status": st,
+                        "generated": (res or {}).get("generated"),
+                        "scored": scored_n, "errors": err})
+                    logs.append(f"=== day {k} as_of={day_as_of} (status={st}) ===\n{log or ''}")
+                    if st != "done":
+                        day_status = st   # surface a failed/cancelled day but keep going through the batch
+                # After ALL days: push ledger/sim -> Neon backtest_results once.
+                sync_status, sync_log = _run_sync_backtest()
+                logs.append(f"=== sync_backtest ===\n{sync_log}")
+                status = day_status if day_status != "done" else ("done" if sync_status else "failed")
+                if not sync_status:
+                    errors = "sync_backtest failed (see log)"
+                log_excerpt = _tail("\n\n".join(logs))
+        except _FileLock.Locked:
+            status, errors = "failed", "another run is already in progress (lock held)"
+            log_excerpt = errors
+        except Exception as ex:
+            status, errors = "failed", f"run_backtest_batch error: {ex}"[:500]
+            log_excerpt = errors
+
+    results = {
+        "sandbox": True, "publish": "skipped (sandbox)", "trigger": "backtest",
+        "days": days, "assets": assets, "total_scored": total_scored,
+        "day_runs": day_results,
+    }
+    try:
+        conn.execute(
+            "UPDATE engine_runs SET status = %s, results = %s, errors = %s, "
+            "  log_excerpt = %s, finished_at = now() WHERE id = %s",
+            (status, json.dumps(results), errors, log_excerpt or None, run_id))
+    except Exception:
+        pass
+    try:
+        set_current_run(conn, None)
+    except Exception:
+        pass
+    return run_id
+
+
+def _run_sync_backtest():
+    """Run sync_backtest.py (ledger/sim -> Neon backtest_results) as a subprocess. Returns
+    (ok: bool, log_tail: str). Best-effort: a sync failure is recorded but never raises."""
+    try:
+        p = subprocess.run([sys.executable, str(SYNC_BACKTEST)], cwd=str(ROOT),
+                           capture_output=True, text=True, timeout=300)
+    except Exception as ex:
+        return False, f"sync_backtest failed to launch: {ex}"[:300]
+    out = ((p.stdout or "") + (p.stderr or "")).strip()
+    return p.returncode == 0, _tail(out, 2000)
 
 
 def _exec_run_daily(conn, args, request_id):
@@ -1182,18 +1309,20 @@ def _cmd_clear_wake(conn, args):
 
 
 def _cmd_run_backtest(conn, args):
-    """Run an ISOLATED backtest: generate + score one or more assets AS-OF a closed window,
-    writing ONLY to the sim/ subtrees (ledger/sim, data/predictions/sim, reports/sim) and
-    NEVER publishing (no export/publish/sync) or rebuilding the live calibration map.
+    """Run an ISOLATED backtest: generate + score one or more assets AS-OF one or more closed
+    windows, writing ONLY to the sim/ subtrees (ledger/sim, data/predictions/sim, reports/sim)
+    and NEVER publishing (no export/publish/sync) or rebuilding the live calibration map.
 
-    args {assets: [asset_id...], as_of: "YYYY-MM-DD HH:MM"}. A backtest REQUIRES a closed
-    window (as_of) and at least one asset — without a past as_of the prediction window
+    args {assets: [asset_id...], as_of: "YYYY-MM-DD HH:MM", days: int=1}. A backtest REQUIRES a
+    closed window (as_of) and at least one asset — without a past as_of the prediction window
     wouldn't be closed (nothing to score), and an unscoped backtest would generate the whole
     universe into sim, which is never what a targeted test wants. Either missing -> clear error.
 
-    Delegates to run_and_record(trigger='backtest', sandbox=True), which appends --sandbox to
-    the run_daily invocation and skips the publish chain. The scope dict carries assets + as_of
-    exactly like the manual/scheduled path (scope_to_run_args wires --asset/--as-of/--mode)."""
+    `days` (default 1, clamped 1..MAX_BACKTEST_DAYS) simulates MULTIPLE consecutive days counting
+    BACK from as_of (day 0 = as_of, day k = as_of - k days, same HH:MM) — each a distinct backdated
+    report. All days run under ONE run lock, all sandboxed; after they complete, sync_backtest.py
+    pushes ledger/sim -> Neon backtest_results once. Delegates to run_backtest_batch, which records
+    ONE engine_runs row (trigger 'backtest') summarising the batch."""
     assets = [str(a).strip().lower() for a in (args.get("assets") or []) if a is not None and str(a).strip()]
     if not assets:
         return False, "run_backtest requires at least one asset (args.assets)", None, False
@@ -1204,10 +1333,46 @@ def _cmd_run_backtest(conn, args):
         datetime.strptime(as_of.strip()[:16], "%Y-%m-%d %H:%M")
     except ValueError:
         return False, f"run_backtest as_of {as_of!r} must be 'YYYY-MM-DD HH:MM'", None, False
-    scope = {"assets": assets, "as_of": as_of.strip()[:16]}
-    run_id = run_and_record(conn, trigger="backtest", scope=scope, sandbox=True)
-    return True, (f"backtest run {run_id} complete (sandbox: ledger/sim + reports/sim, "
-                  f"no publish) — assets={assets} as_of={scope['as_of']}"), None, False
+    days = args.get("days", 1)
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        return False, f"run_backtest days {days!r} must be an integer (1..{MAX_BACKTEST_DAYS})", None, False
+    if days < 1:
+        return False, f"run_backtest days must be >= 1 (got {days})", None, False
+    days = min(MAX_BACKTEST_DAYS, days)
+    run_id = run_backtest_batch(conn, assets, as_of.strip()[:16], days=days)
+    span = "1 day" if days == 1 else f"{days} days (back from as_of)"
+    return True, (f"backtest run {run_id} complete (sandbox: ledger/sim + reports/sim, no publish; "
+                  f"synced to backtest_results) — assets={assets} as_of={as_of.strip()[:16]} "
+                  f"· {span}"), None, False
+
+
+def _cmd_clear_sandbox(conn, args):
+    """Reset the box's SANDBOX working trees so the admin can start a fresh backtest: empties
+    ledger/sim, data/predictions/sim, reports/sim (and only those — the live ledger/reports/data
+    are NEVER touched). Mirrors _cmd_clear_reports' safe per-dir clearing and is held under the run
+    lock so it never deletes mid-backtest. The Neon backtest_results table is cleared separately."""
+    import shutil
+    cleared = []
+    try:
+        with _FileLock(LOCK_PATH, blocking=False):
+            for sub in SANDBOX_DIRS:
+                d = ROOT / sub
+                if not d.is_dir():
+                    continue
+                for child in d.iterdir():
+                    try:
+                        if child.is_dir():
+                            shutil.rmtree(child, ignore_errors=True)
+                        else:
+                            child.unlink()
+                    except Exception:
+                        pass
+                cleared.append(sub)
+    except _FileLock.Locked:
+        return False, "another run is in progress — retry clear_sandbox shortly", None, False
+    return True, f"cleared sandbox dirs: {', '.join(cleared) or '(none present)'}", None, False
 
 
 _COMMAND_HANDLERS = {
@@ -1225,6 +1390,7 @@ _COMMAND_HANDLERS = {
     "clear_r2": _cmd_clear_r2,
     "clear_wake": _cmd_clear_wake,
     "run_backtest": _cmd_run_backtest,
+    "clear_sandbox": _cmd_clear_sandbox,
 }
 
 # Canonical allow-list (the web keeps its own copy for defence in depth; this is the boundary).
