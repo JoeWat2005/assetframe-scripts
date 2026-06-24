@@ -46,7 +46,7 @@ DISCLAIMER = "General market research, not personal financial advice. No outcome
 
 # Safe-wording QA — pump/advice phrases that must never appear in a draft.
 BANNED = [r"\bbuy now\b", r"\bsell now\b", r"\bsure thing\b", r"\bsure trade\b",
-          r"\beasy profit\b", r"\brisk[- ]free\b",
+          r"\beasy profit\b", r"\brisk[- ]free\b(?!\s+(rate|yield|asset|benchmark))",
           r"\byou should buy\b", r"\byou should sell\b",
           r"\bget rich\b", r"\bcan'?t lose\b", r"\bto the moon\b"]
 # "guaranteed" is allowed ONLY in negated compliance form.

@@ -335,7 +335,9 @@ def build_predictions_spec(by_id, brief, direction):
 def assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
              setups, ladder, ledger_levels, conf, asset_class, regime, pred_type,
              as_of_dt=None):
-    ticker = brief.get("ticker", name).upper()
+    # slug/report_id/out_dir must be URL- and object-key-safe — a price symbol like "GC=F" must
+    # never leak an "=" (or "/", space, ...) into the edition id, the R2 key or the public URL.
+    ticker = "".join(c for c in (brief.get("ticker") or name).upper() if c.isalnum() or c in "._-") or "ASSET"
     instrument = brief.get("instrument", name)
     report_date = (session.get("window_start_utc") or analysis.get("fetched_utc") or "")[:10]
     # report_id is the ledger/edition primary key (ON CONFLICT (report_id)) and the scorer's

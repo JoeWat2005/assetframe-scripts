@@ -53,8 +53,8 @@ LADDER_COLORS = {"tail": rp.GRAY, "resistance": rp.RED, "target": rp.BLUE,
                  "trigger": rp.AMBER, "entry": rp.GREEN, "support": (87, 96, 106),
                  "invalidation": (164, 14, 38), "last": rp.DARK}
 
-BANNED = [r"sure trade", r"risk[- ]free", r"easy profit",
-          r"you should buy", r"you should sell"]
+BANNED = [r"sure trade", r"risk[- ]free(?!\s+(rate|yield|asset|benchmark))", r"easy profit",
+          r"you should buy", r"you should sell"]  # "risk-free RATE/yield/asset" is legit finance
 # phrases allowed ONLY in negated compliance form ("no outcome is guaranteed",
 # "not a personal recommendation")
 NEGATED_ONLY = {"guaranteed": r"(no outcome is |not |never |nothing .{0,12}is )$",
