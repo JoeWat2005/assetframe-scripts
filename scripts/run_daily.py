@@ -618,7 +618,9 @@ def main():
         if p["decision"] == "skip":
             print(f"  - skip {p['asset_id']}: {p['reason']}")
 
-    if o["mode"] in ("score_only", "production"):
+    # In sandbox the windows are scored AFTER generation (with a full-candle refresh), so skip this
+    # pre-generate pass for a backtest — it would only see leftover sim predictions with trimmed data.
+    if o["mode"] in ("score_only", "production") and not o["sandbox"]:
         print("scoring closed windows + refreshing memory...")
         manifest["score"] = score_step(now, {a["ticker"] for a in assets})
         s = manifest["score"]
@@ -704,11 +706,22 @@ def main():
     # already closed (as-of past), so grade them now into the sim ledger — there is no separate
     # sandbox "Score now". (Live runs keep the deliberate generate-then-Score-now two-step.)
     if o["sandbox"] and o["mode"] in ("generate_only", "production"):
-        print("scoring the backtest's freshly-generated closed windows...")
-        # Grade against the REAL wall-clock now, NOT the backdated `now`: a backtest's window closes
-        # AFTER its as-of moment, so relative to the as-of it looks "still open"; relative to today it
-        # has already closed — which is the entire point of backdating. (Live runs use `now` above.)
-        post = score_step(datetime.now(timezone.utc), {a["ticker"] for a in assets})
+        # A backtest PREDICTS with candles trimmed to the as-of (no look-ahead); SCORING needs the
+        # candles that cover the now-closed window, so re-fetch the FULL series (a real API call, no
+        # --as-of, spanning as-of -> today) for each generated asset, then grade against the REAL
+        # clock — the backdated window has closed by today, which is the whole point of backdating.
+        real_now = datetime.now(timezone.utc)
+        _hd = max(10, (real_now - now).days + 4)   # candle range must span the as-of window -> today
+        print(f"refreshing full candles ({_hd}d) + scoring the backtest's closed windows...")
+        for a in due_assets:
+            ricmd = ["scripts/intraday.py", a["provider_symbols"]["yahoo"], "--name", a["ticker"],
+                     "--hrange", f"{_hd}d", "--roll-utc", str(a.get("roll_utc", 0)),
+                     "--session-profile", a["session_profile"]]
+            _rtd = (a.get("provider_symbols") or {}).get("twelvedata")
+            if _rtd:
+                ricmd += ["--td-symbol", _rtd]
+            _run(ricmd, timeout=120)
+        post = score_step(real_now, {a["ticker"] for a in due_assets})
         prev = manifest.get("score") or {"scored": [], "skipped": [], "errors": []}
         manifest["score"] = {
             "scored": (prev.get("scored") or []) + post.get("scored", []),
