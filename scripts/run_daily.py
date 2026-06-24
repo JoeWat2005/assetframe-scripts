@@ -700,6 +700,22 @@ def main():
               f"~{tc.get('input_tokens', 0)}in/{tc.get('output_tokens', 0)}out tok "
               f"≈${tc.get('est_cost_usd', 0)}")
 
+    # SANDBOX backtest is one-shot: the generate step above wrote sim predictions whose window is
+    # already closed (as-of past), so grade them now into the sim ledger — there is no separate
+    # sandbox "Score now". (Live runs keep the deliberate generate-then-Score-now two-step.)
+    if o["sandbox"] and o["mode"] in ("generate_only", "production"):
+        print("scoring the backtest's freshly-generated closed windows...")
+        post = score_step(now, {a["ticker"] for a in assets})
+        prev = manifest.get("score") or {"scored": [], "skipped": [], "errors": []}
+        manifest["score"] = {
+            "scored": (prev.get("scored") or []) + post.get("scored", []),
+            "skipped": post.get("skipped", []),
+            "errors": (prev.get("errors") or []) + post.get("errors", []),
+            "memory_refresh": post.get("memory_refresh"),
+        }
+        for sc in post.get("scored", []):
+            print(f"    + scored {sc.get('report_id') or sc.get('file')}: hit_rate={sc.get('hit_rate_pct')}")
+
     # storage retention: prune old reports/ + runs/ edition folders (redundant after R2 publish;
     # the ledger/track record is never touched). Skipped on dry runs. Uses wall-clock UTC today.
     if o["mode"] != "dry_run":
