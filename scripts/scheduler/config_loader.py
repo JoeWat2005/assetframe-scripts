@@ -279,9 +279,11 @@ def get_asset(asset_id, path=DEFAULT_CONFIG):
 # for any key not already set — env always wins, so systemd EnvironmentFile / ad-hoc overrides keep
 # precedence and no read site changes. The admin "set config" command writes this same file.
 RUNTIME_CONFIG = Path("config/engine.json")
-SETTABLE_RUNTIME_KEYS = ("ASSETFRAME_RETENTION_DAYS", "ASSETFRAME_AUTHOR_BRIEFS",
-                         "ASSETFRAME_RUN_TIMEOUT", "ASSETFRAME_BRIEF_MODEL", "ADVISOR_DATA_PROVIDER",
-                         "TWELVEDATA_RATE_PER_MIN")
+# Allow-list of runtime knobs apply_runtime_env() seeds from engine.json. DERIVED from
+# RUNTIME_DEFAULTS so every default is automatically settable from the file — a hardcoded subset
+# silently dropped newer knobs (ASSETFRAME_BRIEF_BATCH / _CRITIC_MODEL / _BRIEF_CONCURRENCY were set
+# in engine.json but never reached os.environ, so batch mode never engaged). Single source of truth.
+SETTABLE_RUNTIME_KEYS = tuple(RUNTIME_DEFAULTS)
 
 
 def apply_runtime_env(path=RUNTIME_CONFIG):

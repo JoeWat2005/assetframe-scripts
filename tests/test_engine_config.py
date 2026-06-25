@@ -44,6 +44,29 @@ def test_apply_runtime_env_env_wins():
         os.environ.pop("ASSETFRAME_BRIEF_MODEL", None)
 
 
+def test_apply_runtime_env_seeds_batch_and_critic_keys():
+    # Regression: ASSETFRAME_BRIEF_BATCH / _CRITIC_MODEL were in RUNTIME_DEFAULTS but the
+    # apply_runtime_env allow-list was a stale hardcoded subset, so engine.json's batch flag never
+    # reached os.environ and batch mode silently never engaged. The allow-list now derives from
+    # RUNTIME_DEFAULTS, so every default knob seeds from the file.
+    for k in ("ASSETFRAME_BRIEF_BATCH", "ASSETFRAME_CRITIC_MODEL", "ASSETFRAME_BRIEF_CONCURRENCY"):
+        assert k in CL.SETTABLE_RUNTIME_KEYS, f"{k} must be settable from engine.json"
+    d = Path(tempfile.mkdtemp())
+    p = d / "engine.json"
+    p.write_text(json.dumps({"ASSETFRAME_BRIEF_BATCH": "1",
+                             "ASSETFRAME_CRITIC_MODEL": "claude-haiku-4-5-20251001"}), encoding="utf-8")
+    os.environ.pop("ASSETFRAME_BRIEF_BATCH", None)
+    os.environ.pop("ASSETFRAME_CRITIC_MODEL", None)
+    try:
+        applied = CL.apply_runtime_env(p)
+        assert applied.get("ASSETFRAME_BRIEF_BATCH") == "1"
+        assert os.environ["ASSETFRAME_BRIEF_BATCH"] == "1"
+        assert os.environ["ASSETFRAME_CRITIC_MODEL"] == "claude-haiku-4-5-20251001"
+    finally:
+        os.environ.pop("ASSETFRAME_BRIEF_BATCH", None)
+        os.environ.pop("ASSETFRAME_CRITIC_MODEL", None)
+
+
 def test_engine_sqlite_aux_tables_roundtrip():
     d = Path(tempfile.mkdtemp())
     db = d / "engine.sqlite"
