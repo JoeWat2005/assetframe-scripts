@@ -748,10 +748,14 @@ def main():
     name = sys.argv[1]
     o = parse_args(sys.argv[2:])
 
+    # Under sandbox, read the brief/research/social from the sim/ subtrees so a backtest NEVER picks
+    # up the LIVE news-laden brief/packs (look-ahead). run_daily authors a fresh technical-only brief
+    # into data/briefs/sim; the sim research/social dirs stay empty (no web search), so those load {}.
+    _sb = "/sim" if os.environ.get("ASSETFRAME_SANDBOX") == "1" else ""
     analysis = load_json(o["analysis"] or f"data/analysis/{name}_analysis.json", True, "analysis")
-    brief = load_json(o["brief"] or f"data/briefs/{name}_research_brief.json", True, "research brief")
-    research = load_json(o["research"] or f"data/research/{name}_research_pack.json")
-    social = load_json(o["social"] or f"data/social/{name}_social_pack.json")
+    brief = load_json(o["brief"] or f"data/briefs{_sb}/{name}_research_brief.json", True, "research brief")
+    research = load_json(o["research"] or f"data/research{_sb}/{name}_research_pack.json")
+    social = load_json(o["social"] or f"data/social{_sb}/{name}_social_pack.json")
     ledger_ctx = load_json(o["ledger_context"] or f"data/ledger_context/{name}_ledger_context.json")
     calib = load_json(o["calib"] or "ledger/calibration_map.json")
 
