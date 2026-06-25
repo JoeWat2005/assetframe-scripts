@@ -31,6 +31,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -179,6 +180,45 @@ def _upstash(command):
 def heartbeat_upstash():
     """Write the engine heartbeat to Upstash with a TTL (expires if the poller dies)."""
     return _upstash(["SET", HEARTBEAT_KEY, _utcnow().isoformat(), "EX", str(HEARTBEAT_TTL)])
+
+
+# --- background heartbeat daemon --------------------------------------------
+# A long run_and_record() (a multi-minute run_daily / backtest subprocess) BLOCKS the poller's
+# single-threaded loop, so the in-loop heartbeat never fires and the box flips to OFFLINE for the
+# whole run. This daemon keeps the Upstash heartbeat (the web's primary online signal) fresh every
+# few seconds INDEPENDENTLY of the blocking run. Upstash-only (no Neon connection sharing across
+# threads); best-effort (never raises). The in-loop heartbeat(conn)/heartbeat_upstash() calls stay
+# as a top-up that also refreshes the Neon heartbeat between runs.
+_HB_THREAD = None
+_HB_STOP = None
+
+
+def start_heartbeat_daemon(interval=10):
+    """Start (idempotently) a daemon thread that calls heartbeat_upstash() every `interval` seconds
+    until stop_heartbeat_daemon(). Call once at poller startup."""
+    global _HB_THREAD, _HB_STOP
+    if _HB_THREAD is not None and _HB_THREAD.is_alive():
+        return
+    _HB_STOP = threading.Event()
+    stop = _HB_STOP
+
+    def _run():
+        while True:
+            try:
+                heartbeat_upstash()
+            except Exception:
+                pass
+            if stop.wait(interval):     # returns True once stop is set -> exit
+                return
+
+    _HB_THREAD = threading.Thread(target=_run, name="assetframe-heartbeat", daemon=True)
+    _HB_THREAD.start()
+
+
+def stop_heartbeat_daemon():
+    """Signal the heartbeat daemon to stop (best-effort; the thread is a daemon so it never blocks exit)."""
+    if _HB_STOP is not None:
+        _HB_STOP.set()
 
 
 def wake_pending():

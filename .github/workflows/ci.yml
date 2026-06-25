@@ -58,8 +58,17 @@ jobs:
             .venv/bin/pip install -r requirements.txt --quiet
             npm install --omit=dev --no-audit --no-fund
             sudo systemctl restart "$2"
-            sleep 2
-            systemctl is-active "$2"
+            # Wait for the service to reach 'active' — systemctl is-active returns exit 3 while it is
+            # still 'activating' (a transient state on a slow start), which would fail the deploy under
+            # `set -e`. Poll for up to ~30s; only fail if it never becomes active.
+            for i in $(seq 1 60); do
+              if systemctl is-active --quiet "$2"; then break; fi
+              if [ "$i" -eq 60 ]; then
+                echo "::error::$2 did not reach active state within 30s"; systemctl --no-pager status "$2" | tail -20; exit 1
+              fi
+              sleep 0.5
+            done
+            echo "$2 is active"
             echo "::endgroup::"
           }
           if [ "$REF" = "main" ]; then

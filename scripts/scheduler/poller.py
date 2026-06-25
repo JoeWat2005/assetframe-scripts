@@ -131,6 +131,10 @@ def loop(interval):
     using = "Upstash" if engine_ops.upstash_enabled() else "Neon (no Upstash env — per-tick polling)"
     _log(f"starting — interval={interval}s; work signal via {using}. "
          f"Manual requests run even when paused; the daily timer respects the pause flag.")
+    # Keep the box ONLINE during long runs: a background daemon refreshes the Upstash heartbeat every
+    # ~10s independently of the (single-threaded) tick, which can block for minutes on a run/backtest.
+    # It's a daemon thread, so it dies automatically when the process exits on SIGTERM.
+    engine_ops.start_heartbeat_daemon(interval=10)
     n = 0
     reaped = False
     while not _STOP:
@@ -169,6 +173,7 @@ def loop(interval):
         end = time.time() + remaining
         while not _STOP and time.time() < end:
             time.sleep(min(1.0, end - time.time()))
+    engine_ops.stop_heartbeat_daemon()
     _log("stopped cleanly")
     return 0
 

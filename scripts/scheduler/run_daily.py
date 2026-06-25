@@ -305,19 +305,29 @@ def author_brief_step(asset, brief_path):
         res["status"] = "writer_unavailable"
         return res
 
-    # 3. bounded revise loop (exactly one repair pass)
+    # 3. bounded revise loop (exactly one repair pass). A 'revise' verdict ALREADY means the brief is
+    # PUBLISHABLE (minor edits) and a valid brief is on disk. The repair pass is best-effort polish —
+    # so if the re-author or its re-critique FAILS, we KEEP that first publishable brief and still
+    # generate, rather than throwing a usable brief away (which produced spurious "needs_brief").
+    # Only a CLEAR reject/stand_aside on a SUCCESSFUL re-critique skips the asset. The QA gate
+    # (mvp_report.run_qa) remains the hard backstop on the rendered report.
     if decision == "revise":
         guidance = _issues_to_guidance(verdict)
         ok, rc, msg = _write(guidance=guidance)
         if not ok:
-            res["status"] = "writer_unavailable" if rc == 3 else "brief_failed"
+            # repair-author failed -> the first 'revise' brief is still on disk + publishable. Keep it.
             res["critic_summary"] = (msg or res["critic_summary"])[-200:]
-            return res
-        verdict, _crc, cmsg = _critique()
-        decision = verdict.get("decision")
-        res["decision"] = decision
-        res["critic_summary"] = verdict.get("summary", "") or res["critic_summary"]
-        res["issues"] = verdict.get("issues", [])
+            decision = "revise"
+        else:
+            verdict, _crc, cmsg = _critique()
+            new_decision = verdict.get("decision")
+            if new_decision:                 # re-critique parsed -> trust the corrected verdict
+                decision = new_decision
+                res["decision"] = decision
+                res["critic_summary"] = verdict.get("summary", "") or res["critic_summary"]
+                res["issues"] = verdict.get("issues", [])
+            else:                            # re-critique unparseable -> keep the (re-authored) brief
+                decision = "revise"
 
     # 4/5. resolve on the final decision
     if decision in ("approve", "revise"):

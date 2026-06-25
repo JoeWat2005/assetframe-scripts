@@ -34,6 +34,7 @@ except Exception:
 
 sys.path.insert(0, str(Path(__file__).parent))
 import report_pdf as rp
+from _paths import ROOT   # repo-root anchor (depth-independent; the scripts/__init__ shim is on sys.path)
 
 try:
     from taxonomy import PREDICTION_TYPES
@@ -43,7 +44,7 @@ except Exception:  # taxonomy is stdlib-only; fall back so the generator stays r
 
 BRAND = "AssetFrame"
 TAGLINE = "Next-session market intelligence, scored after the fact."
-LOGO = Path(__file__).parent.parent / "logo" / "logo_trimmed.png"
+LOGO = ROOT / "logo" / "logo_trimmed.png"   # repo-root logo/ (NOT scripts/logo — depth-independent)
 LOGO_ASPECT = 4.954  # w/h of trimmed wordmark
 ACCENT = (11, 37, 69)         # logo navy
 ACCENT_FILL = (233, 238, 246)
