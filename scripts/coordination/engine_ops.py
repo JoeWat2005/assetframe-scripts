@@ -621,6 +621,32 @@ def _backdated_as_of(as_of, k):
     return (base - timedelta(days=k)).strftime("%Y-%m-%d %H:%M")
 
 
+def _wipe_sandbox_state(conn):
+    """Reset ALL sandbox state so a backtest run starts FRESH: empties the sim/ working trees
+    (ledger/sim, data/predictions/sim, reports/sim, data/{briefs,research,social}/sim) AND clears the
+    Neon backtest_results / backtest_predictions tables. This stops leftover rows from a previous
+    backtest (e.g. an already-scored window) bleeding into the new run. ONLY ever touches sandbox
+    state — never the live ledger, editions, scored_results or reports. Best-effort; never raises."""
+    import shutil
+    for sub in SANDBOX_DIRS:
+        d = ROOT / sub
+        if not d.is_dir():
+            continue
+        for child in d.iterdir():
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink()
+            except Exception:
+                pass
+    for tbl in ("backtest_predictions", "backtest_results"):
+        try:
+            conn.execute(f"DELETE FROM {tbl}")   # admin-only sandbox tables (never the live track record)
+        except Exception:
+            pass
+
+
 def run_backtest_batch(conn, assets, as_of, days=1):
     """Run a MULTI-DAY sandbox backtest: for each of `days` consecutive days counting BACK from
     as_of (day 0 = as_of, day k = as_of - k days, SAME HH:MM), generate + score the given assets
@@ -674,6 +700,8 @@ def run_backtest_batch(conn, assets, as_of, days=1):
     if bad is None:
         try:
             with _FileLock(LOCK_PATH, blocking=False) as _lk:   # noqa: F841 — one lock for ALL days
+                _wipe_sandbox_state(conn)   # each backtest run starts FRESH — clear the sim ledger +
+                                            # Neon backtest tables so leftover rows never bleed in
                 logs = []
                 day_status = "done"
                 for k in range(days):

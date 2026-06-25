@@ -484,7 +484,11 @@ def _client(anthropic):
               "Set it in the environment, or supply an operator-written brief.",
               file=sys.stderr)
         sys.exit(3)
-    return anthropic.Anthropic(api_key=key)
+    # Generous retries with the SDK's exponential backoff (honours Retry-After). A multi-asset
+    # parallel daily run bursts many Messages calls at once and can hit the tier's per-minute rate
+    # limit (HTTP 429) or a transient 'overloaded' (529); the SDK retries those automatically. Used
+    # by both brief_writer and critic.py (which imports this _client).
+    return anthropic.Anthropic(api_key=key, max_retries=8)
 
 
 def _extract_json(blocks):
