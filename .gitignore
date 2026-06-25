@@ -32,6 +32,11 @@ ledger/backups/
 # The committed template is config/engine.example.json.
 config/engine.json
 
+# Python virtualenv (the box runs from .venv/) — box-local, never committed. Listed so a
+# `git clean -fd` reset can never delete the interpreter the systemd unit runs.
+.venv/
+.venv-dev/
+
 # Node (the sync-db.mjs publish helper)
 node_modules/
 
