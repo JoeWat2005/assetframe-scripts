@@ -22,12 +22,12 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # The research-scoring modules that MUST NOT know marketing metrics exist.
 SCORING_MODULES = [
-    "scripts/confidence.py",
-    "scripts/calibrate.py",
-    "scripts/ledger_context.py",
-    "scripts/research_memory.py",
-    "scripts/score_report.py",
-    "scripts/scaffold_payload.py",
+    "scripts/pipeline/confidence.py",
+    "scripts/analytics/calibrate.py",
+    "scripts/analytics/ledger_context.py",
+    "scripts/analytics/research_memory.py",
+    "scripts/pipeline/score_report.py",
+    "scripts/pipeline/scaffold_payload.py",
 ]
 
 # Marketing-only terms. A scoring module referencing any of these breaches the firewall.

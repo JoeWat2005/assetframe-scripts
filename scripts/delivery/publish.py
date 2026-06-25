@@ -26,7 +26,7 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from _paths import ROOT          # repo-root anchor (scripts/__init__ shim is on sys.path under -m)
 REPORTS = ROOT / "reports"
 # Every report file is private in R2 now (free Snapshots AND Pro reports); the web app
 # serves them only through the auth-gated /api/report route. Keys mirror the request path.

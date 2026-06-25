@@ -40,7 +40,7 @@ from pathlib import Path
 
 import taxonomy
 import confidence as conf_engine
-from sessions import get_session, get_window
+from sessions import get_session, get_window, get_cadence_window, CADENCE_WINDOWS
 
 try:
     from zoneinfo import ZoneInfo
@@ -334,7 +334,7 @@ def build_predictions_spec(by_id, brief, direction):
 
 def assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
              setups, ladder, ledger_levels, conf, asset_class, regime, pred_type,
-             as_of_dt=None):
+             as_of_dt=None, cadence=None):
     # The report identity (slug / report_id / out_dir / R2 key / scoring scope) is pinned to the
     # asset NAME the scheduler passed (run_daily sends the asset ticker), NOT the AI/operator brief's
     # `ticker` field — a divergent brief ticker would de-scope the asset from scoring and could leak
@@ -350,9 +350,12 @@ def assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
     # second being dropped as an already-scored duplicate — that's how you grow the track
     # record quickly when testing. Ticker stays the rsplit('-',1) suffix, so every downstream
     # parser (year = first 4 digits, ticker = last segment) is unaffected.
-    rid_stamp = (as_of_dt.strftime("%Y%m%d%H%M") if as_of_dt is not None
-                 else report_date.replace("-", ""))
     win_s, win_e = session["window_start_utc"], session["window_end_utc"]
+    # One ledger row per cadence PERIOD: the stamp is period-based (weekly AF-YYYYWww, monthly
+    # AF-YYYYMM); daily keeps the stable per-day id (and the per-minute backdated id for seeding).
+    rid_stamp = _period_stamp(cadence, win_s, as_of_dt)
+    report_id = f"AF-{rid_stamp}-{ticker}"
+    scored_cadence = (cadence or session.get("scored_cadence") or "daily")
     # Window-freshness guard (defends the late-run window-switch case): if the analysis was
     # fetched well before this payload is assembled (execution backlog between the intraday
     # fetch and scaffold), the levels may be stale for the chosen window. Surface a warning the
@@ -418,6 +421,10 @@ def assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
         "data_quality_score": dq,
         "market_regime": regime, "direction_view": brief.get("directional_view", ""),
         "prediction_type": pred_type, "horizon": brief.get("horizon", "next_session"),
+        # cadence/intervals carried through for the editions table + track-record grouping (Workstream D)
+        "report_id": report_id, "scored_cadence": scored_cadence,
+        "chart_intervals": analysis.get("chart_intervals") or [],
+        "forecast_window": session.get("forecast_window") or "",
         "confidence_band": taxonomy.confidence_band(conf["published"]),
         "lookback_used": _lookback(analysis),
         "asset_specific_stats_included": brief.get("asset_specific_stats_included", []),
@@ -431,10 +438,10 @@ def assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
 
     free = build_free(name, analysis, brief, session, last_price, dq, by_id)
     pro = build_pro(name, analysis, brief, session, last_price, dq, levels, setups,
-                    canonical["ledger_levels"], conf, by_id)
+                    canonical["ledger_levels"], conf, by_id, cadence=cadence)
 
     return {
-        "report_id": f"AF-{rid_stamp}-{ticker}",
+        "report_id": report_id,
         "title": brief.get("title", f"{instrument} ({ticker})"),
         "subtitle": brief.get("subtitle", f"{meta['venue']} - {meta['prediction_window_start_report_tz']}"
                     f" -> {meta['prediction_window_end_report_tz']}"),
@@ -525,12 +532,17 @@ def _assert_free_split(free):
         die("free chart exceeds 3 levels or carries pivots/bands")
 
 
-def build_pro(name, analysis, brief, session, last_price, dq, levels, setups, ledger_levels, conf, by_id):
+def build_pro(name, analysis, brief, session, last_price, dq, levels, setups, ledger_levels, conf,
+              by_id, cadence=None):
     nb = brief.get("narrative", {})
     files = analysis.get("files") or {}
     hourly = files.get("hourly_csv", f"data/candles/{name}_hourly.csv")
     daily = files.get("daily_csv", f"data/candles/{name}_daily.csv")
 
+    # The daily + hourly pair is always present: the hourly chart is the QA price anchor (its last
+    # close must equal canonical.last_price) and the daily is the regime base. Higher cadences PREPEND
+    # coarser context charts (weekly -> +weekly; monthly -> +monthly+weekly) read from the analysis
+    # interval blocks, falling back silently when an interval wasn't fetched.
     charts = [
         {"csv": daily, "label": "Daily regime - 1 year shown", "height": 220,
          "display_days": 366, "smas": [50, 200]},
@@ -538,6 +550,21 @@ def build_pro(name, analysis, brief, session, last_price, dq, levels, setups, le
          "smas": [20, 50], "rsi": True, "rsi_tag": "hourly",
          "pivots": {k.upper(): by_id[k]["value"] for k in ("pp", "r1", "r2", "s1") if k in by_id}},
     ]
+    intervals = analysis.get("intervals") or {}
+
+    def _ictx(iv, label, display_days, smas):
+        blk = intervals.get(iv) or {}
+        csv_path = blk.get("csv")
+        return ({"csv": csv_path, "label": label, "height": 220,
+                 "display_days": display_days, "smas": smas} if csv_path and blk.get("bars") else None)
+
+    ctx = []
+    if (cadence or "").lower() == "weekly":
+        ctx = [_ictx("1week", "Weekly regime - 2 years shown", 730, [20, 50])]
+    elif (cadence or "").lower() == "monthly":
+        ctx = [_ictx("1month", "Monthly regime - 5 years shown", 1825, [12]),
+               _ictx("1week", "Weekly - 1 year shown", 365, [20])]
+    charts = [c for c in ctx if c] + charts
 
     sections = []
     if nb.get("market_summary"):
@@ -652,13 +679,14 @@ def parse_args(argv):
     o = {"analysis": None, "brief": None, "research": None, "social": None,
          "ledger_context": None, "calib": None, "session_profile": None, "forecast_window": None,
          "out": None, "predictions": None, "as_of": None, "window_end": None,
-         "timeframes": None, "check": False}
+         "timeframes": None, "cadence": None, "check": False}
     i = 0
     keys = {"--analysis": "analysis", "--brief": "brief", "--research": "research",
             "--social": "social", "--ledger-context": "ledger_context", "--calib": "calib",
             "--session-profile": "session_profile", "--forecast-window": "forecast_window",
             "--out": "out", "--predictions": "predictions",
-            "--as-of": "as_of", "--window-end": "window_end", "--timeframes": "timeframes"}
+            "--as-of": "as_of", "--window-end": "window_end", "--timeframes": "timeframes",
+            "--cadence": "cadence"}
     while i < len(argv):
         a = argv[i]
         if a == "--check":
@@ -692,6 +720,25 @@ def _track_report_id(base_report_id, horizon):
         return base_report_id
     head, _, tick = base_report_id.rpartition("-")
     return f"{head}{tag}-{tick}" if head else base_report_id + tag
+
+
+def _period_stamp(cadence, window_start_utc, as_of_dt):
+    """The report_id date stamp, one per cadence PERIOD (so the ledger row is unique per period):
+      daily   -> AF-YYYYMMDD (live) / AF-YYYYMMDDHHMM (backdated, to seed fast)
+      weekly  -> AF-YYYYWww   (ISO week; one row per week, backdated or live)
+      monthly -> AF-YYYYMM    (one row per month)
+    The leading 4 digits stay the year and the ticker stays the rsplit('-',1) suffix, so every
+    downstream parser is unaffected."""
+    cad = (cadence or "daily").strip().lower()
+    if cad == "weekly":
+        d = datetime.strptime(window_start_utc[:10], "%Y-%m-%d").date()
+        iso = d.isocalendar()
+        return f"{iso[0]}W{iso[1]:02d}"
+    if cad == "monthly":
+        return window_start_utc[:7].replace("-", "")          # YYYYMM
+    if as_of_dt is not None:                                   # daily backdated
+        return as_of_dt.strftime("%Y%m%d%H%M")
+    return window_start_utc[:10].replace("-", "")             # daily live -> YYYYMMDD
 
 
 def main():
@@ -738,7 +785,14 @@ def main():
     _seen = set()
     timeframes = [t for t in timeframes if not (t in _seen or _seen.add(t))]
     primary_fw = timeframes[0]
-    session = get_window(profile, now=now_dt, forecast_window=primary_fw)
+    # Cadence (daily/weekly/monthly) drives the CANONICAL per-period window: one prediction set
+    # scored at the period close. Falls back to the forecast-window machinery when no cadence is
+    # passed (back-compat for manual/legacy runs). chart_intervals (analysis) stay a distinct concept.
+    cadence = (o.get("cadence") or "").strip().lower() or None
+    if cadence in CADENCE_WINDOWS:
+        session = get_cadence_window(profile, cadence, now=now_dt)
+    else:
+        session = get_window(profile, now=now_dt, forecast_window=primary_fw)
     if now_dt is not None:
         session["window_start_utc"] = now_dt.strftime("%Y-%m-%d %H:%M")
     if o["window_end"]:
@@ -754,7 +808,14 @@ def main():
     # a window per configured timeframe (track 0 = the primary/published window above). The horizon
     # follows the WINDOW (forecast_window) -- NOT the brief's label -- so the primary's ledger row and
     # its applied calibration land in the same bucket the extra tracks use.
-    primary_horizon = _horizon_for(primary_fw)
+    # horizon (the scoring/calibration bucket) follows the cadence when one is set: daily ->
+    # next_session, weekly/monthly -> multi_session; else it follows the forecast window.
+    if cadence in ("weekly", "monthly"):
+        primary_horizon = "multi_session"
+    elif cadence == "daily":
+        primary_horizon = "next_session"
+    else:
+        primary_horizon = _horizon_for(primary_fw)
     track_specs = [{"forecast_window": primary_fw, "horizon": primary_horizon,
                     "window_start_utc": session["window_start_utc"],
                     "window_end_utc": session["window_end_utc"]}]
@@ -801,7 +862,7 @@ def main():
 
     payload = assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
                        setups, ladder, ledger_levels, conf, asset_class, regime, pred_type,
-                       as_of_dt=now_dt)
+                       as_of_dt=now_dt, cadence=cadence)
     payload["timeframes"] = track_specs   # multi-timeframe outlook (one report, N horizon tracks)
     if analysis.get("fundamentals"):      # canonical equity fundamentals (Pro render; never scored)
         payload["fundamentals"] = analysis["fundamentals"]

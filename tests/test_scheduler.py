@@ -107,7 +107,7 @@ class Idempotency(unittest.TestCase):
                     "predictions": [{"id": "P1", "type": "close_above", "level": 1.00, "expect": True}]}
             predp = d / "p_predictions.json"
             predp.write_text(json.dumps(pred))
-            sr = str(HERE / "score_report.py")
+            sr = str(HERE.parent / "scripts" / "pipeline" / "score_report.py")
             for _ in range(2):
                 subprocess.run([sys.executable, sr, str(predp)], cwd=str(d),
                                capture_output=True, text=True)

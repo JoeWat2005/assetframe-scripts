@@ -187,6 +187,13 @@ def main():
         opts["out"].parent.mkdir(parents=True, exist_ok=True)
         opts["out"].write_text(json.dumps(cmap, indent=1) + "\n", encoding="utf-8")
         print(f"\nwrote {opts['out']}")
+        # Append a snapshot to engine.sqlite calibration_history (audit of how the map evolved).
+        # Best-effort: the live map is the file above; this is history only and never blocks.
+        try:
+            import ledger_db
+            ledger_db.record_calibration(cmap.get("conf_version"), cmap.get("n_rows"), cmap)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

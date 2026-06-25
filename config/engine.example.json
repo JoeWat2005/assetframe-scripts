@@ -1,0 +1,9 @@
+{
+  "_README": "Template for the single runtime-settings file. Copy to config/engine.json to override the built-in defaults (optional — a missing file just uses these same values). Operator-tunable knobs only; SECRETS (DATABASE_URL, R2_*, *_API_KEY, UPSTASH_*) stay in .env. The asset universe stays in config/assets.json (synced from Neon engine_assets). Keys are the legacy env-var names; the real environment overrides any value here. The admin dashboard 'set config' command writes to config/engine.json (which is gitignored, so its edits persist across deploys).",
+  "ADVISOR_DATA_PROVIDER": "yahoo",
+  "ASSETFRAME_BRIEF_MODEL": "claude-sonnet-4-6",
+  "ASSETFRAME_AUTHOR_BRIEFS": "1",
+  "ASSETFRAME_RETENTION_DAYS": "14",
+  "ASSETFRAME_RUN_TIMEOUT": "5400",
+  "TWELVEDATA_RATE_PER_MIN": "8"
+}

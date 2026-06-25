@@ -218,7 +218,7 @@ class TestAppendOnlyLedger(unittest.TestCase):
         env = dict(os.environ)
         # run from a temp cwd so the default ledger path is isolated
         return subprocess.run(
-            [sys.executable, os.path.join(HERE, "score_report.py"), pred_path,
+            [sys.executable, os.path.join(os.path.dirname(HERE), "scripts", "pipeline", "score_report.py"), pred_path,
              "--hourly", self._hourly],
             cwd=ledger_path[0], capture_output=True, text=True, env=env)
 
@@ -230,7 +230,7 @@ class TestAppendOnlyLedger(unittest.TestCase):
 
         p1 = self._make_predictions_file("AF-20250106-AAA", "2025-01-06 09:00",
                                          "2025-01-06 11:00", self._hourly)
-        r1 = subprocess.run([sys.executable, os.path.join(HERE, "score_report.py"), p1,
+        r1 = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), "scripts", "pipeline", "score_report.py"), p1,
                              "--hourly", self._hourly],
                             cwd=workdir, capture_output=True, text=True)
         self.assertEqual(r1.returncode, 0, r1.stderr + r1.stdout)
@@ -241,7 +241,7 @@ class TestAppendOnlyLedger(unittest.TestCase):
 
         p2 = self._make_predictions_file("AF-20250106-BBB", "2025-01-06 09:00",
                                          "2025-01-06 11:00", self._hourly)
-        r2 = subprocess.run([sys.executable, os.path.join(HERE, "score_report.py"), p2,
+        r2 = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), "scripts", "pipeline", "score_report.py"), p2,
                              "--hourly", self._hourly],
                             cwd=workdir, capture_output=True, text=True)
         self.assertEqual(r2.returncode, 0, r2.stderr + r2.stdout)
@@ -261,7 +261,7 @@ class TestAppendOnlyLedger(unittest.TestCase):
         self._hourly = self._make_hourly()
         p1 = self._make_predictions_file("AF-20250106-AAA", "2025-01-06 09:00",
                                          "2025-01-06 11:00", self._hourly)
-        r = subprocess.run([sys.executable, os.path.join(HERE, "score_report.py"), p1,
+        r = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), "scripts", "pipeline", "score_report.py"), p1,
                             "--hourly", self._hourly, "--dry-run"],
                            cwd=workdir, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)

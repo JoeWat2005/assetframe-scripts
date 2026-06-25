@@ -18,11 +18,11 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from _paths import ROOT          # repo-root anchor (scripts/__init__ shim is on sys.path under -m)
 
-# Shared taxonomy (asset-class normalization). The script is invoked as
-# `python scripts/export_content.py`, so put scripts/ on the path first; fall back to a
-# pass-through so a missing module can never break the export.
+# Shared taxonomy (asset-class normalization). Invoked as `python -m scripts.delivery.export_content`;
+# the package shim already exposes the sibling modules. Fall back to a pass-through so a missing
+# module can never break the export.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     from taxonomy import ASSET_CLASS_KEYS, validate_asset_class
@@ -70,6 +70,19 @@ def _norm_asset_class(value):
     alias = {"equities": "equity", "stock": "equity", "stocks": "equity", "forex": "fx",
              "indices": "index", "commodities": "commodity", "future": "futures"}
     return alias.get(v, v)
+
+
+def cadence_of(report_id):
+    """Derive the scoring cadence from the report_id period stamp (the segment between the leading
+    'AF' and the trailing ticker): AF-YYYYWww -> weekly, AF-YYYYMM (6 digits) -> monthly, else daily
+    (AF-YYYYMMDD / AF-YYYYMMDDHHMM). Mirror of content.ts cadenceOf()."""
+    parts = (report_id or "").split("-")
+    stamp = parts[1] if len(parts) >= 2 else ""
+    if "W" in stamp.upper():
+        return "weekly"
+    if stamp.isdigit() and len(stamp) == 6:
+        return "monthly"
+    return "daily"
 
 
 def _parse_results(packed):
@@ -138,6 +151,11 @@ def load_catalog(reports_dir, include_dev, since=None):
             "windowEnd": m.get("prediction_window_end_report_tz", ""),
             "reportDate": m.get("report_date", date),
             "catalystStatus": m.get("catalyst_status", ""),
+            # report_id (the cadence-aware ledger/edition key) + cadence/intervals for display + joins
+            "reportId": m.get("report_id", ""),
+            "scoredCadence": m.get("scored_cadence") or cadence_of(m.get("report_id")),
+            "chartIntervals": m.get("chart_intervals") or [],
+            "forecastWindow": m.get("forecast_window", ""),
             # Approval gate: hidden until an admin un-hides (auto-publish assets ship visible).
             "hidden": policy != "auto",
             "freeHtml": f"{base}/free.html",
@@ -156,7 +174,7 @@ def _build_aggregates(rows):
     hits/misses already graded into the ledger — no new scoring here."""
     if not rows:
         return {"byInstrument": [], "byAssetClass": [], "byPredictionType": [],
-                "byRegime": [], "timeline": [], "calibrationCurve": [],
+                "byRegime": [], "byCadence": [], "timeline": [], "calibrationCurve": [],
                 "componentVsOutcome": []}
 
     # byInstrument carries ticker + normalized assetClass; the others are flat groupings.
@@ -193,6 +211,7 @@ def _build_aggregates(rows):
                            "predType")
     by_regime = _rename(_agg_rows(rows, lambda r: (r.get("market_regime") or "").strip()),
                         "regime")
+    by_cadence = _rename(_agg_rows(rows, lambda r: cadence_of(r.get("report_id"))), "cadence")
 
     # timeline: chronological (by window_end), cumulative + per-report hit rate.
     timeline = []
@@ -277,7 +296,7 @@ def _build_aggregates(rows):
             "hitRate": round(100 * g["hits"] / graded, 1) if graded else None})
 
     return {"byInstrument": by_instrument, "byAssetClass": by_asset_class,
-            "byPredictionType": by_pred_type, "byRegime": by_regime,
+            "byPredictionType": by_pred_type, "byRegime": by_regime, "byCadence": by_cadence,
             "timeline": timeline, "calibrationCurve": calibration_curve,
             "componentVsOutcome": component_vs_outcome}
 
@@ -306,6 +325,7 @@ def load_track_record(ledger_csv, pred_dir, scored_ids):
                 # path and JSON fallback expose the same shape.
                 "assetClass": _norm_asset_class(r.get("asset_class")),
                 "predType": r.get("pred_type", ""),
+                "scoredCadence": cadence_of(r.get("report_id")),
             })
         if len(rows) >= 10:
             buckets = {"<=60": [], "61-75": [], ">75": []}
@@ -410,6 +430,7 @@ def main():
         "byAssetClass": aggregates["byAssetClass"],
         "byPredictionType": aggregates["byPredictionType"],
         "byRegime": aggregates["byRegime"],
+        "byCadence": aggregates["byCadence"],
         "timeline": aggregates["timeline"],
         "calibrationCurve": aggregates["calibrationCurve"],
         "componentVsOutcome": aggregates["componentVsOutcome"],

@@ -2,9 +2,11 @@
 source of truth.
 
 ledger/outcome_ledger.csv stays the append-only, human-readable source of truth (the engine
-still writes ONLY to the CSV; see score_report.py). This module derives ledger/outcome_ledger.sqlite
-from it for cheap indexed analytics (per-instrument / per-pred-type / per-regime roll-ups, the
-admin dashboard, ad-hoc SQL) where scanning a growing CSV in Python would get slow.
+still writes ONLY to the CSV; see score_report.py). This module derives ledger/engine.sqlite — the
+single local engine DB — from it for cheap indexed analytics (per-instrument / per-pred-type /
+per-regime roll-ups, the admin dashboard, ad-hoc SQL) where scanning a growing CSV in Python would
+get slow. The same DB also holds append-only engine-history tables (runs, calibration_history,
+asset_cache) so growing run/calibration history lives in a DB rather than loose JSON.
 
 Design guarantees (why this is safe):
   * Mirror only. The .sqlite is DROP+CREATE rebuilt from the CSV every time, so it can never
@@ -27,7 +29,9 @@ import sys
 from pathlib import Path
 
 DEFAULT_CSV = Path("ledger/outcome_ledger.csv")
-DEFAULT_DB = Path("ledger/outcome_ledger.sqlite")
+# The single local engine DB (gitignored, derived): the ledger mirror PLUS append-only history
+# tables (runs, calibration_history, asset_cache). The CSV stays the canonical ledger writer.
+DEFAULT_DB = Path("ledger/engine.sqlite")
 
 # Mirrors score_report.LEDGER_COLS exactly (first 13 original + 7 taxonomy). Order is the CSV
 # header order. (col_name, sqlite_type). REAL/INTEGER columns are coerced; bad cells -> NULL.
@@ -40,6 +44,76 @@ COLUMNS = [
     ("pred_type", "TEXT"), ("direction", "TEXT"), ("horizon", "TEXT"), ("market_regime", "TEXT"),
 ]
 _INDEXES = ["report_id", "instrument", "asset_class", "pred_type", "horizon", "window_end_utc"]
+
+
+def ensure_aux_tables(con):
+    """Create the append-only engine-history tables if absent (idempotent). These live alongside
+    the ledger mirror in engine.sqlite; rebuild() never drops them (it only DROP+CREATEs `ledger`)."""
+    con.execute("CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, mode TEXT, run_date TEXT, "
+                "status TEXT, generated INTEGER, manifest_json TEXT, recorded_at TEXT)")
+    con.execute("CREATE TABLE IF NOT EXISTS calibration_history (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "fitted_at TEXT, conf_version TEXT, n_rows INTEGER, map_json TEXT)")
+    con.execute("CREATE TABLE IF NOT EXISTS asset_cache (id INTEGER PRIMARY KEY CHECK (id = 1), "
+                "synced_at TEXT, n_assets INTEGER, assets_json TEXT)")
+
+
+def record_run(run_id, mode, run_date, status, generated=None, manifest=None, db_path=DEFAULT_DB):
+    """Append/replace a run-history row in engine.sqlite. Best-effort: never raises (an audit
+    table must never block or fail a run). Returns True on success."""
+    try:
+        con = sqlite3.connect(str(Path(db_path)))
+        try:
+            ensure_aux_tables(con)
+            con.execute(
+                "INSERT OR REPLACE INTO runs (run_id, mode, run_date, status, generated, manifest_json, "
+                "recorded_at) VALUES (?,?,?,?,?,?,datetime('now'))",
+                (run_id, mode, run_date, status, generated,
+                 json.dumps(manifest) if manifest is not None else None))
+            con.commit()
+        finally:
+            con.close()
+        return True
+    except Exception:
+        return False
+
+
+def record_calibration(conf_version, n_rows, calibration_map, db_path=DEFAULT_DB):
+    """Append a calibration snapshot to engine.sqlite (history/audit). Best-effort; never raises."""
+    try:
+        con = sqlite3.connect(str(Path(db_path)))
+        try:
+            ensure_aux_tables(con)
+            con.execute(
+                "INSERT INTO calibration_history (fitted_at, conf_version, n_rows, map_json) "
+                "VALUES (datetime('now'), ?, ?, ?)",
+                (str(conf_version), int(n_rows or 0),
+                 json.dumps(calibration_map) if calibration_map is not None else None))
+            con.commit()
+        finally:
+            con.close()
+        return True
+    except Exception:
+        return False
+
+
+def cache_assets(assets, db_path=DEFAULT_DB):
+    """Store the last-synced asset universe snapshot in engine.sqlite (diagnostics only — NOT the
+    source of truth, which stays Neon engine_assets / config/assets.json). Best-effort; never raises."""
+    try:
+        con = sqlite3.connect(str(Path(db_path)))
+        try:
+            ensure_aux_tables(con)
+            con.execute(
+                "INSERT INTO asset_cache (id, synced_at, n_assets, assets_json) "
+                "VALUES (1, datetime('now'), ?, ?) ON CONFLICT(id) DO UPDATE SET "
+                "synced_at=excluded.synced_at, n_assets=excluded.n_assets, assets_json=excluded.assets_json",
+                (len(assets or []), json.dumps(assets or [])))
+            con.commit()
+        finally:
+            con.close()
+        return True
+    except Exception:
+        return False
 
 
 def _coerce(sqltype, val):
@@ -89,6 +163,7 @@ def rebuild(csv_path=DEFAULT_CSV, db_path=DEFAULT_DB):
             if col == "report_id":
                 continue  # already the PK
             cur.execute(f'CREATE INDEX IF NOT EXISTS idx_ledger_{col} ON ledger("{col}")')
+        ensure_aux_tables(con)            # keep the engine-history tables alongside the mirror
         con.commit()
         n = con.execute("SELECT COUNT(*) FROM ledger").fetchone()[0]
     finally:

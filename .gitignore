@@ -17,12 +17,20 @@ ledger/outcome_ledger.csv
 ledger/calibration_map.json
 ledger/research_memory.json
 ledger/outcome_ledger.sqlite
+ledger/engine.sqlite
 ledger/backups/
 
 # Secrets — never commit (the template IS committed)
 .env
 .env.*
 !.env.example
+
+# Runtime settings file — BOX-LOCAL mutable state: the dashboard "set config" command edits it
+# in place and those edits must PERSIST across deploys (unlike assets.json, which re-syncs from
+# Neon). Keeping it untracked also stops `git pull --ff-only` from conflicting on a box edit. A
+# fresh checkout has no file -> config_loader.load_runtime_config() falls back to its defaults.
+# The committed template is config/engine.example.json.
+config/engine.json
 
 # Node (the sync-db.mjs publish helper)
 node_modules/

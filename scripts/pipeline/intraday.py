@@ -119,6 +119,7 @@ def yahoo_chart(symbol, interval, rng):
     well-formed result the rows are returned as-is (an empty-but-valid result is left for the
     caller's degrade path, exactly as before)."""
     last = None
+    interval = {"1week": "1wk", "1month": "1mo"}.get(interval, interval)  # Yahoo's vocabulary
     for host in _YAHOO_HOSTS:
         url = (f"https://{host}/v8/finance/chart/{urllib.parse.quote(symbol)}"
                f"?interval={interval}&range={rng}")
@@ -379,7 +380,10 @@ def twelvedata_chart(symbol, interval, rng, api_key, td_symbol=None):
         tsym, klass = map_symbol_twelvedata(symbol)
         if tsym is None:
             raise ValueError(f"twelvedata does not cover {klass}")
-    tiv = {"60m": "1h", "1h": "1h", "1d": "1day", "5m": "5min", "1m": "1min"}.get(interval, "1day")
+    tiv = {"60m": "1h", "1h": "1h", "1d": "1day", "5m": "5min", "1m": "1min",
+           "1week": "1week", "1month": "1month"}.get(interval)
+    if tiv is None:                                   # explicit, not a silent default-to-daily
+        raise ValueError(f"twelvedata: unsupported interval {interval!r}")
     span_days = max(1, range_to_timedelta(rng).days)
     outsize = min(5000, max(60, span_days + 5) if tiv == "1day" else max(120, span_days * 8))
     url = (f"https://api.twelvedata.com/time_series?symbol={urllib.parse.quote(tsym)}"
@@ -783,6 +787,104 @@ def compute_pivots_bands(prior_hlc, anchor_close, atr_daily):
     return pivots, bands
 
 
+# --- selectable analysis intervals (chart_intervals) -----------------------
+# An asset may analyse more than the canonical 60m + 1d pair. Sub-daily extras
+# (2h/4h/8h) are RESAMPLED from the 60m series and weekly/monthly from the daily
+# series, so NO extra provider calls are made (rate-limit safe) and the derived
+# bars are always consistent with the canonical pair the rest of the pipeline reads.
+SUPPORTED_INTERVALS = ("60m", "2h", "4h", "8h", "1d", "1week", "1month")
+CANONICAL_INTERVALS = ("60m", "1d")
+_INTRADAY_HOURS = {"2h": 2, "4h": 4, "8h": 8}
+
+
+def parse_chart_intervals(raw):
+    """Validate a comma list against SUPPORTED_INTERVALS. Skip+warn unknowns, NEVER raise.
+    Always returns a deduped list that includes the canonical 60m + 1d pair (so the rest of
+    the pipeline — sessions, pivots, freshness — always has its inputs)."""
+    requested = [i.strip().lower() for i in (raw or "").split(",") if i.strip()]
+    valid, dropped = [], []
+    for iv in requested:
+        (valid if iv in SUPPORTED_INTERVALS else dropped).append(iv)
+    for iv in dropped:
+        print(f"WARNING: skipping unsupported chart interval {iv!r} "
+              f"(allowed: {', '.join(SUPPORTED_INTERVALS)})", file=sys.stderr)
+    out = []
+    for iv in list(CANONICAL_INTERVALS) + valid:   # canonical first, then extras
+        if iv not in out:
+            out.append(iv)
+    return out
+
+
+def _resample_hours(rows, hours):
+    """Aggregate 60m bars into fixed N-hour UTC-aligned buckets. rows ascending UTC."""
+    if not rows or hours <= 1:
+        return list(rows)
+    span = hours * 3600
+    buckets, order = {}, []
+    for r in rows:
+        b = (int(r["ts"]) // span) * span
+        s = buckets.get(b)
+        if s is None:
+            buckets[b] = {"ts": b, "o": r["o"], "h": r["h"], "l": r["l"], "c": r["c"], "v": r["v"]}
+            order.append(b)
+        else:
+            s["h"] = max(s["h"], r["h"]); s["l"] = min(s["l"], r["l"])
+            s["c"] = r["c"]; s["v"] += r["v"]
+    return [buckets[b] for b in order]
+
+
+def _resample_calendar(rows, period):
+    """Aggregate daily bars into weekly (ISO week) or monthly buckets. rows ascending UTC."""
+    if not rows:
+        return []
+    buckets, order = {}, []
+    for r in rows:
+        d = datetime.fromtimestamp(r["ts"], tz=timezone.utc).date()
+        key = d.isocalendar()[:2] if period == "1week" else (d.year, d.month)
+        s = buckets.get(key)
+        if s is None:
+            buckets[key] = {"ts": int(r["ts"]), "o": r["o"], "h": r["h"], "l": r["l"],
+                            "c": r["c"], "v": r["v"]}
+            order.append(key)
+        else:
+            s["h"] = max(s["h"], r["h"]); s["l"] = min(s["l"], r["l"])
+            s["c"] = r["c"]; s["v"] += r["v"]
+    return [buckets[k] for k in order]
+
+
+def build_interval_series(interval, hourly, daily):
+    """OHLCV rows for a requested interval, derived from the canonical pair (no extra fetch)."""
+    if interval == "60m":
+        return list(hourly)
+    if interval == "1d":
+        return list(daily)
+    if interval in _INTRADAY_HOURS:
+        return _resample_hours(hourly, _INTRADAY_HOURS[interval])
+    if interval in ("1week", "1month"):
+        return _resample_calendar(daily, interval)
+    return []
+
+
+def _write_candles(path, rows, intraday=True):
+    fmt = "%Y-%m-%d %H:%M" if intraday else "%Y-%m-%d"
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        for r in rows:
+            w.writerow([datetime.fromtimestamp(r["ts"], tz=timezone.utc).strftime(fmt),
+                        f'{r["o"]:.6f}', f'{r["h"]:.6f}', f'{r["l"]:.6f}', f'{r["c"]:.6f}', r["v"]])
+
+
+def interval_block(interval, rows):
+    """Compact, additive indicator block for one analysis interval (metadata only)."""
+    closes = [r["c"] for r in rows]
+    s20, s50 = sma(closes, 20), sma(closes, 50)
+    trend = (classify_long_term(closes, s50, sma(closes, 200))
+             if len(closes) >= 50 else "Insufficient data")
+    return {"bars": len(rows), "last_close": round(closes[-1], 6) if closes else None,
+            "sma20": s20, "sma50": s50, "rsi14": rsi14(closes), "atr14": atr14(rows),
+            "trend": trend}
+
+
 def main():
     symbol = sys.argv[1]
     args = dict(zip(sys.argv[2::2], sys.argv[3::2]))
@@ -883,6 +985,25 @@ def main():
         for r in daily:
             w.writerow([datetime.fromtimestamp(r["ts"], tz=timezone.utc).strftime("%Y-%m-%d"),
                         f'{r["o"]:.6f}', f'{r["h"]:.6f}', f'{r["l"]:.6f}', f'{r["c"]:.6f}', r["v"]])
+
+    # --- additional analysis intervals (chart_intervals): derived from the canonical pair,
+    # written as data/candles/{name}_{interval}.csv with an additive analysis block each.
+    chart_intervals = parse_chart_intervals(args.get("--chart-intervals", "60m,1d"))
+    intervals_meta = {}
+    for iv in chart_intervals:
+        if iv == "60m":
+            ipath, irows, intra = candles_dir / f"{name}_hourly.csv", hourly, True
+        elif iv == "1d":
+            ipath, irows, intra = candles_dir / f"{name}_daily.csv", daily, False
+        else:
+            irows = build_interval_series(iv, hourly, daily)
+            intra = iv in _INTRADAY_HOURS
+            ipath = candles_dir / f"{name}_{iv}.csv"
+            if irows:
+                _write_candles(ipath, irows, intraday=intra)
+        blk = interval_block(iv, irows)
+        blk["csv"] = ipath.as_posix()
+        intervals_meta[iv] = blk
 
     dc = [r["c"] for r in daily]
     hc = [r["c"] for r in hourly]
@@ -1109,6 +1230,8 @@ def main():
         "atr_day_bands": bands_out,
         "files": {"hourly_csv": (candles_dir / f"{name}_hourly.csv").as_posix(),
                   "daily_csv": (candles_dir / f"{name}_daily.csv").as_posix()},
+        "chart_intervals": chart_intervals,
+        "intervals": intervals_meta,
     }
     if cutoff_dt is not None:
         out["as_of"] = cutoff_dt.strftime("%Y-%m-%d %H:%M")

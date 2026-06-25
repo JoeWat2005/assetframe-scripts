@@ -803,18 +803,27 @@ def run_qa(p):
     level_vals = [float(l["value"]) for l in c["levels"]]
     last = float(c["last_price"]["value"])
 
-    # --- price triple-equality (header/chart/metadata) from the hourly CSV
+    # --- price triple-equality (header/chart/metadata) from the finest chart CSV that has bars.
+    # Defined unconditionally so the qa dict references below can never hit UnboundLocalError.
+    ok_price = False
     hourly_cfg = next((ch for ch in p["pro"]["charts"] if "hourly" in ch["csv"].lower()
                        or ch.get("display_days", 99) <= 30), p["pro"]["charts"][-1])
     rows = rp.read_series(Path(hourly_cfg["csv"]))
     if not rows:
-        # A degraded/empty hourly CSV must FAIL QA cleanly, not crash on rows[-1].
-        errs.append(f"hourly CSV {hourly_cfg['csv']} has no rows - cannot verify the canonical price")
+        # Degraded/empty intraday CSV (e.g. backdated runs with no hourly history): fall back to
+        # the coarsest pro chart that DOES have bars rather than crashing on rows[-1] or hard-failing.
+        for ch in p["pro"]["charts"]:
+            alt = rp.read_series(Path(ch["csv"]))
+            if alt:
+                hourly_cfg, rows = ch, alt
+                break
+    if not rows:
+        errs.append("no pro chart CSV has rows - cannot verify the canonical price")
     else:
         csv_last = rows[-1]["c"]
         ok_price = abs(csv_last - last) <= max(0.01, last * 1e-5)
         if not ok_price:
-            errs.append(f"canonical last {last} != hourly CSV last close {csv_last}")
+            errs.append(f"canonical last {last} != chart CSV last close {csv_last}")
     if str(meta.get("last_price", "")).strip() == "":
         errs.append("meta.last_price empty")
     free_chart_same = p["free"]["chart"]["csv"] == hourly_cfg["csv"]

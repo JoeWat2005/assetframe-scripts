@@ -39,15 +39,25 @@ from pathlib import Path
 import psycopg
 from psycopg.rows import dict_row
 
-ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS = ROOT / "scripts"
-RUN_DAILY = SCRIPTS / "run_daily.py"
-SYNC_BACKTEST = SCRIPTS / "sync_backtest.py"   # pushes ledger/sim -> Neon backtest_results
+from _paths import ROOT, SCRIPTS         # repo-root anchors (the scripts/__init__ shim is on sys.path)
+RUN_DAILY = "scripts.scheduler.run_daily"          # spawned as `python -m <module>` (cwd = ROOT)
+SYNC_BACKTEST = "scripts.analytics.sync_backtest"  # pushes ledger/sim -> Neon backtest_results
 LOCK_PATH = ROOT / ".run.lock"          # serialises run_daily across timer + poller
 # The sandbox working trees a backtest writes to (cleared by clear_sandbox; never the live trees).
 SANDBOX_DIRS = ["ledger/sim", "data/predictions/sim", "reports/sim"]
 MAX_BACKTEST_DAYS = 90                   # up to ~3 months back; clamp so a typo can't fan out forever
 LOG_EXCERPT_BYTES = 24 * 1024           # last ~24KB of combined stdout/stderr (richer dashboard log)
+
+# Seed the non-secret runtime knobs from config/engine.json BEFORE the import-time RUN_TIMEOUT read
+# below (env wins, so systemd EnvironmentFile still overrides). This is also what the admin
+# "set config" command writes, so a changed knob takes effect on the next poller restart.
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+try:
+    import config_loader as _cfg
+    _cfg.apply_runtime_env(ROOT / "config" / "engine.json")
+except Exception:
+    pass
 
 
 def _int_env(name, default):
@@ -447,8 +457,8 @@ def _publish_chain(conn, request_id):
     # sync — the web reads editions/scored_results from Neon, and the R2 files can be re-pushed later
     # with "Re-publish reports". export + sync are fatal (the sync is what makes a run visible).
     steps = [
-        ("export", [sys.executable, str(SCRIPTS / "export_content.py")], True),
-        ("publish", [sys.executable, str(SCRIPTS / "publish.py")], False),
+        ("export", [sys.executable, "-m", "scripts.delivery.export_content"], True),
+        ("publish", [sys.executable, "-m", "scripts.delivery.publish"], False),
         ("sync", ["node", str(SCRIPTS / "sync-db.mjs")], True),
     ]
     logs = []
@@ -677,7 +687,7 @@ def _run_sync_backtest():
     """Run sync_backtest.py (ledger/sim -> Neon backtest_results) as a subprocess. Returns
     (ok: bool, log_tail: str). Best-effort: a sync failure is recorded but never raises."""
     try:
-        p = subprocess.run([sys.executable, str(SYNC_BACKTEST)], cwd=str(ROOT),
+        p = subprocess.run([sys.executable, "-m", SYNC_BACKTEST], cwd=str(ROOT),
                            capture_output=True, text=True, timeout=300)
     except Exception as ex:
         return False, f"sync_backtest failed to launch: {ex}"[:300]
@@ -692,7 +702,7 @@ def _exec_run_daily(conn, args, request_id):
     Output is captured by redirecting the child's stdout+stderr to a temp file we tail
     (so we don't deadlock on a full OS pipe during a long run)."""
     import tempfile
-    cmd = [sys.executable, str(RUN_DAILY)] + args
+    cmd = [sys.executable, "-m", RUN_DAILY] + args
     cancelled = False
     err_msg = None
     outbuf = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
@@ -1001,8 +1011,10 @@ def _cmd_tail_logs(conn, args):
 
 
 def _cmd_set_config(conn, args):
-    """Set ONE allow-listed config key in ROOT/.env. Takes effect on the next restart (systemd
-    reads EnvironmentFile at start). Tight allow-list; never writes secrets/credentials/URLs."""
+    """Set ONE allow-listed config key in config/engine.json — the single runtime-settings file
+    (config_loader.apply_runtime_env seeds it into the environment at each entrypoint's startup, so
+    it takes effect on the next restart). Tight allow-list; never writes secrets/credentials/URLs
+    (those stay in .env)."""
     key = (args.get("key") or "").strip()
     if key not in _SETTABLE_CONFIG_KEYS:
         return False, f"key '{key}' is not settable (allowed: {sorted(_SETTABLE_CONFIG_KEYS)})", None, False
@@ -1012,30 +1024,23 @@ def _cmd_set_config(conn, args):
     validator = _CONFIG_VALUE_VALIDATORS.get(key)
     if validator and not validator(value):
         return False, f"value {value!r} is not valid for {key}", None, False
-    envp = ROOT / ".env"
+    cfgp = ROOT / "config" / "engine.json"
     try:
-        lines = envp.read_text(encoding="utf-8").splitlines() if envp.exists() else []
+        data = json.loads(cfgp.read_text(encoding="utf-8-sig")) if cfgp.exists() else {}
+        if not isinstance(data, dict):
+            data = {}
     except Exception as ex:
-        return False, f"could not read .env: {ex}"[:200], None, False
-    found = False
-    for i, line in enumerate(lines):
-        s = line.strip()
-        if s and not s.startswith("#") and "=" in s and s.split("=", 1)[0].strip() == key:
-            lines[i] = f"{key}={value}"
-            found = True
-            break
-    if not found:
-        lines.append(f"{key}={value}")
+        return False, f"could not read engine.json: {ex}"[:200], None, False
+    data[key] = value
     try:
-        # Atomic write (tmp + os.replace): .env holds DATABASE_URL + the R2/Anthropic secrets, so a
-        # crash mid-write must NEVER truncate it (that would brick the poller — ConfigError loop —
-        # with no inbound recovery path). os.replace is atomic within the same directory.
-        tmp = ROOT / ".env.tmp"
-        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        os.replace(tmp, envp)
+        # Atomic write (tmp + os.replace) so a crash mid-write can never truncate the settings file.
+        cfgp.parent.mkdir(parents=True, exist_ok=True)
+        tmp = ROOT / "config" / "engine.json.tmp"
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, cfgp)
     except Exception as ex:
-        return False, f"could not write .env: {ex}"[:200], None, False
-    return True, f"set {key} (restart the poller for it to take effect)", None, False
+        return False, f"could not write engine.json: {ex}"[:200], None, False
+    return True, f"set {key} in config/engine.json (restart the poller for it to take effect)", None, False
 
 
 def _sync_assets_from_neon(conn):
@@ -1046,7 +1051,8 @@ def _sync_assets_from_neon(conn):
     the dashboard (and the git-tracked config/assets.json default is just a bootstrap)."""
     base_sql = ("id, name, instrument, ticker, provider_symbols, asset_class, session_profile, "
                 "cadence, timezone, roll_utc, related, forecast_window, publish_policy, report_tier, enabled")
-    mt_sql = ", cadence_day, timeframes, include_fundamentals, include_news, fundamentals_source"
+    mt_sql = (", cadence_day, timeframes, include_fundamentals, include_news, fundamentals_source, "
+              "chart_intervals")
     # Try the multi-timeframe columns; if the migration that adds them hasn't run on this box's DB
     # yet (deploy skew: new code + old DB), fall back to the base columns so the sync still works.
     try:
@@ -1093,6 +1099,14 @@ def _sync_assets_from_neon(conn):
                 tfs = None
         if isinstance(tfs, list) and tfs:
             a["timeframes"] = [str(t) for t in tfs]
+        civ = r.get("chart_intervals")
+        if isinstance(civ, str):
+            try:
+                civ = json.loads(civ)
+            except Exception:
+                civ = None
+        if isinstance(civ, list) and civ:
+            a["chart_intervals"] = [str(i) for i in civ]
         if r.get("include_fundamentals") is not None:
             a["include_fundamentals"] = bool(r.get("include_fundamentals"))
         if r.get("include_news") is not None:
@@ -1119,6 +1133,11 @@ def _sync_assets_from_neon(conn):
             pass
         return False, f"validation failed — kept the existing config. {str(ex)[:240]}"
     enabled = sum(1 for a in assets if a["enabled"])
+    try:                                   # diagnostics snapshot in engine.sqlite (best-effort)
+        import ledger_db
+        ledger_db.cache_assets(assets, db_path=ROOT / "ledger" / "engine.sqlite")
+    except Exception:
+        pass
     return True, f"synced {len(assets)} assets to config/assets.json ({enabled} enabled)"
 
 
@@ -1178,7 +1197,7 @@ def _cmd_run_scoring(conn, args):
     generating new reports. Held under the run lock. Use it to push the track record forward on demand."""
     try:
         with _FileLock(LOCK_PATH, blocking=False):
-            p = subprocess.run([sys.executable, str(RUN_DAILY), "--mode", "score_only"],
+            p = subprocess.run([sys.executable, "-m", RUN_DAILY, "--mode", "score_only"],
                                cwd=str(ROOT), capture_output=True, text=True, timeout=900)
     except _FileLock.Locked:
         return False, "another run is in progress — retry run_scoring shortly", None, False
@@ -1210,7 +1229,7 @@ def _cmd_compute_due(conn, args):
     then write each asset's due status back to engine_assets so the dashboard can show which
     instruments are scheduled to generate. Safe + read-only w.r.t. reports."""
     try:
-        p = subprocess.run([sys.executable, str(RUN_DAILY), "--mode", "dry_run"],
+        p = subprocess.run([sys.executable, "-m", RUN_DAILY, "--mode", "dry_run"],
                            cwd=str(ROOT), capture_output=True, text=True, timeout=180)
     except Exception as ex:
         return False, f"dry_run failed to launch: {ex}"[:200], None, False

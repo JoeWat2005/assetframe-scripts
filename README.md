@@ -32,11 +32,14 @@ cp .env.example .env                # fill R2_*, DATABASE_URL[_DEV], EODHD/ANTHR
 
 ## Daily run (the scheduler decides; Claude only writes/criticises)
 
+The engine is a Python package (`scripts/` with concern subpackages: `pipeline`, `scheduler`,
+`analytics`, `delivery`, `coordination`). Run every entrypoint as a module from the repo root:
+
 ```bash
-python scripts/validate_config.py                # validate config/assets.json
-python scripts/run_daily.py --mode dry_run       # resolve today's DUE assets, write nothing
-python scripts/run_daily.py --mode score_only    # score closed windows + refresh memory (idempotent)
-python scripts/run_daily.py --mode generate_only # generate due assets
+python -m scripts.scheduler.validate_config        # validate config/assets.json
+python -m scripts.scheduler.run_daily --mode dry_run       # resolve today's DUE assets, write nothing
+python -m scripts.scheduler.run_daily --mode score_only    # score closed windows + refresh memory (idempotent)
+python -m scripts.scheduler.run_daily --mode generate_only # generate due assets
 ```
 Modes: `dry_run | score_only | generate_only | production` (Phase 2 adds `approval`). Scope with
 `--asset <id>` or `--asset-class fx`. Run manifests land in `runs/<date>/run_manifest.json`.
@@ -44,8 +47,8 @@ Modes: `dry_run | score_only | generate_only | production` (Phase 2 adds `approv
 ## Publish chain (engine → site)
 
 ```bash
-python scripts/export_content.py    # -> content/catalog.json + content/track-record.json
-python scripts/publish.py           # -> uploads report files to R2
+python -m scripts.delivery.export_content   # -> content/catalog.json + content/track-record.json
+python -m scripts.delivery.publish          # -> uploads report files to R2
 npm run sync-db                     # -> writes editions + track record into Neon (both branches)
 ```
 

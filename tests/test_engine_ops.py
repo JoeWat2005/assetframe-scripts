@@ -459,23 +459,26 @@ class CommandQueue(unittest.TestCase):
         self.assertIn("publish exited 2", result)
 
     def test_set_config_allowlist_replace_and_reject(self):
+        import json as _json
         import tempfile
         import shutil
         d = Path(tempfile.mkdtemp())
         try:
             with mock.patch.object(E, "ROOT", d):
-                # replaces an existing line, preserves others
-                (d / ".env").write_text("ASSETFRAME_AUTHOR_BRIEFS=0\nOTHER=keep\n", encoding="utf-8")
+                cfgp = d / "config" / "engine.json"
+                cfgp.parent.mkdir(parents=True, exist_ok=True)
+                # set_config now writes config/engine.json (the single runtime-settings file), NOT .env.
+                # replaces an existing key, preserves others.
+                cfgp.write_text(_json.dumps({"ASSETFRAME_AUTHOR_BRIEFS": "0", "OTHER": "keep"}), encoding="utf-8")
                 ok, _r, _l, _rs = E._cmd_set_config(None, {"key": "ASSETFRAME_AUTHOR_BRIEFS", "value": "1"})
                 self.assertTrue(ok)
-                txt = (d / ".env").read_text(encoding="utf-8")
-                self.assertIn("ASSETFRAME_AUTHOR_BRIEFS=1", txt)
-                self.assertNotIn("ASSETFRAME_AUTHOR_BRIEFS=0", txt)
-                self.assertIn("OTHER=keep", txt)
-                # disallowed key (e.g. a secret) is rejected
+                cfg = _json.loads(cfgp.read_text(encoding="utf-8"))
+                self.assertEqual(cfg["ASSETFRAME_AUTHOR_BRIEFS"], "1")
+                self.assertEqual(cfg["OTHER"], "keep")     # untouched keys preserved
+                # disallowed key (e.g. a secret) is rejected and never written
                 ok2, _r2, _l2, _rs2 = E._cmd_set_config(None, {"key": "DATABASE_URL", "value": "postgres://x"})
                 self.assertFalse(ok2)
-                self.assertNotIn("DATABASE_URL", (d / ".env").read_text(encoding="utf-8"))
+                self.assertNotIn("DATABASE_URL", _json.loads(cfgp.read_text(encoding="utf-8")))
                 # newline-injection value is rejected
                 ok3, _r3, _l3, _rs3 = E._cmd_set_config(None, {"key": "ASSETFRAME_AUTHOR_BRIEFS", "value": "a\nEVIL=1"})
                 self.assertFalse(ok3)
@@ -485,7 +488,7 @@ class CommandQueue(unittest.TestCase):
                 self.assertFalse(E._cmd_set_config(None, {"key": "ASSETFRAME_RUN_TIMEOUT", "value": "999999999"})[0])
                 self.assertFalse(E._cmd_set_config(None, {"key": "ASSETFRAME_RUN_TIMEOUT", "value": ""})[0])
                 self.assertTrue(E._cmd_set_config(None, {"key": "ASSETFRAME_RUN_TIMEOUT", "value": "300"})[0])
-                self.assertIn("ASSETFRAME_RUN_TIMEOUT=300", (d / ".env").read_text(encoding="utf-8"))
+                self.assertEqual(_json.loads(cfgp.read_text(encoding="utf-8"))["ASSETFRAME_RUN_TIMEOUT"], "300")
                 # a key removed from the allow-list is no longer settable
                 self.assertFalse(E._cmd_set_config(None, {"key": "ASSETFRAME_MAX_WORKERS", "value": "8"})[0])
         finally:

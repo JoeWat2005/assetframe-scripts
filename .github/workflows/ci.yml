@@ -11,17 +11,13 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt pytest
       - name: Run engine test suite
         timeout-minutes: 8
-        run: |
-          fail=0
-          for t in scripts/test_*.py; do
-            echo "=== $t ==="
-            # Hard per-test cap: a hung test fails fast (rc 124) instead of stalling the job.
-            timeout 120 python "$t" || { echo "::error::$t failed or timed out (rc=$?)"; fail=1; }
-          done
-          exit $fail
+        # Tests live in tests/ (separated from the executable scripts/ package). conftest.py puts the
+        # repo root on sys.path and imports the scripts package so its subpackage shim resolves the
+        # modules' flat imports. Run from the repo root.
+        run: python -m pytest tests/ -q
 
   # Continuous deploy to the OCI engine box via a self-hosted runner (label: assetframe), which
   # keeps the VM inbound-portless: the runner dials out to GitHub, no SSH port is exposed. Runs

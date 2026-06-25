@@ -19,7 +19,7 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from _paths import ROOT          # repo-root anchor (scripts/__init__ shim is on sys.path under -m)
 
 
 def _load_local_env():

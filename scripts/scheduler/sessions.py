@@ -368,6 +368,67 @@ def get_window(profile_key, now=None, forecast_window=None, holiday_dates=None,
     return out
 
 
+# --- cadence windows --------------------------------------------------------
+# One prediction set per cadence PERIOD: a daily report scores at the next day/session
+# close, weekly at the week-end close, monthly at the month-end close. This is the canonical
+# window the ledger row is keyed to. Built on the same get_session/get_window primitives so
+# the existing scoring (generic on window bounds) and holiday/DST handling are reused.
+CADENCE_WINDOWS = ("daily", "weekly", "monthly")
+
+
+def _month_end_close(profile_key, start, holiday_dates):
+    """UTC instant of the close on the last trading day of start's month; if that is already
+    at/before `start` (generated near month-end), roll to next month's end."""
+    from calendar import monthrange
+    ptype = PROFILES[profile_key]["type"]
+    holiday_dates = holiday_dates or set()
+    d = start.date()
+    for _ in range(2):                       # this month, else next month
+        md = d.replace(day=monthrange(d.year, d.month)[1])
+        while md.weekday() >= 5 or md in holiday_dates:
+            md -= timedelta(days=1)
+        if ptype == "equity_rth":
+            end = _equity_rth(profile_key, md)[1]
+        elif ptype == "crypto_24_7":
+            end = datetime(md.year, md.month, md.day, 23, 59, tzinfo=UTC)
+        else:
+            end = _local_close_on(profile_key, md, "weekly_close")
+        if end > start:
+            return end
+        d = (d.replace(day=1) + timedelta(days=32)).replace(day=1)   # first of next month
+    return start + timedelta(days=30)        # pathological fallback
+
+
+def get_cadence_window(profile_key, cadence, now=None, holiday_dates=None,
+                       min_remaining_min=90, friday_cutoff_min=240):
+    """Resolve the canonical per-period prediction window for an asset's generation cadence.
+    daily -> next session/daily-liquidity close; weekly -> week-end; monthly -> month-end.
+    Returns the get_session dict with window_end_utc set to the period close + a 'scored_cadence' tag."""
+    cadence = (cadence or "daily").strip().lower()
+    ptype = PROFILES[profile_key]["type"]
+    kw = dict(now=now, holiday_dates=holiday_dates, min_remaining_min=min_remaining_min,
+              friday_cutoff_min=friday_cutoff_min)
+    if cadence == "weekly":
+        out = get_window(profile_key, forecast_window="next_week", **kw)
+        out["window_label"] = "this week (to week-end close)"
+        out["scored_cadence"] = "weekly"
+        return out
+    if cadence == "monthly":
+        out = get_window(profile_key, forecast_window="next_week", **kw)
+        start = datetime.strptime(out["window_start_utc"], "%Y-%m-%d %H:%M").replace(tzinfo=UTC)
+        out["window_end_utc"] = _fmt(_month_end_close(profile_key, start, holiday_dates))
+        out["window_label"] = "this month (to month-end close)"
+        out["scored_cadence"] = "monthly"
+        return out
+    # daily (and any unknown cadence): a single-session window. 24/5 venues re-target to the next
+    # DAILY liquidity close so each day owns a distinct, non-overlapping window; equity/crypto
+    # already get a ~1-day window from get_session.
+    fw = "next_liquid_session" if ptype in ("fx_24_5", "futures_23h") else None
+    out = get_window(profile_key, forecast_window=fw, **kw)
+    out["scored_cadence"] = "daily"
+    return out
+
+
 if __name__ == "__main__":
     import json, sys
     key = sys.argv[1] if len(sys.argv) > 1 else "cme_futures"

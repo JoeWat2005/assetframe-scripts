@@ -32,6 +32,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _paths import ROOT          # repo-root anchor (scripts/__init__ shim is on sys.path under -m)
+import config_loader
+# Seed runtime settings from config/engine.json BEFORE engine_ops reads RUN_TIMEOUT at import (env wins).
+config_loader.apply_runtime_env(ROOT / "config" / "engine.json")
 import engine_ops
 
 

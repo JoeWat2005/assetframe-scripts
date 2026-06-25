@@ -49,10 +49,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS = ROOT / "scripts"
+from _paths import ROOT, SCRIPTS   # repo-root anchors (scripts/__init__ shim is on sys.path under -m)
 sys.path.insert(0, str(SCRIPTS))
 import config_loader
+# Seed runtime settings from config/engine.json before any module-level env read below (env wins).
+config_loader.apply_runtime_env(ROOT / "config" / "engine.json")
 import calendar_rules
 import memory_pack as mp
 
@@ -191,7 +192,7 @@ def score_step(now, tickers=None):
             skipped.append({"file": pf.name, "reason": "out of scope"}); continue
         if wend >= now:
             skipped.append({"file": pf.name, "reason": "window still open"}); continue
-        ok, out, err = _run(["scripts/score_report.py", str(pf.relative_to(ROOT))])
+        ok, out, err = _run(["-m", "scripts.pipeline.score_report", str(pf.relative_to(ROOT))])
         try:
             summary = json.loads(out[out.index("{"):]) if "{" in out else {}
         except Exception:
@@ -213,9 +214,9 @@ def score_step(now, tickers=None):
         refresh = {"skipped": "sandbox"}
     else:
         refresh = {}
-        for label, cmd in (("calibrate", ["scripts/calibrate.py"]),
-                           ("research_memory", ["scripts/research_memory.py"]),
-                           ("ledger_db", ["scripts/ledger_db.py", "rebuild"])):
+        for label, cmd in (("calibrate", ["-m", "scripts.analytics.calibrate"]),
+                           ("research_memory", ["-m", "scripts.analytics.research_memory"]),
+                           ("ledger_db", ["-m", "scripts.analytics.ledger_db", "rebuild"])):
             ok, _o, err = _run(cmd, timeout=60)
             refresh[label] = "ok" if ok else f"failed: {(err or '')[-120:]}"
     return {"scored": scored, "skipped": skipped, "errors": errors, "memory_refresh": refresh}
@@ -259,7 +260,7 @@ def author_brief_step(asset, brief_path):
         return str(p.relative_to(ROOT))
 
     def _write(guidance=None):
-        cmd = ["scripts/brief_writer.py", tk, "--analysis", _rel(analysis),
+        cmd = ["-m", "scripts.pipeline.brief_writer", tk, "--analysis", _rel(analysis),
                "--memory-pack", _rel(mempack), "--out", _rel(brief_path)]
         if research.exists():
             cmd += ["--research", _rel(research)]
@@ -278,7 +279,7 @@ def author_brief_step(asset, brief_path):
         return ok, rc, (err or out)
 
     def _critique():
-        cmd = ["scripts/critic.py", _rel(brief_path), "--asset", tk, "--analysis", _rel(analysis)]
+        cmd = ["-m", "scripts.pipeline.critic", _rel(brief_path), "--asset", tk, "--analysis", _rel(analysis)]
         if research.exists():
             cmd += ["--research", _rel(research)]
         ok, rc, out, err = _run_rc(cmd, timeout=CRITIC_TIMEOUT)
@@ -418,9 +419,12 @@ def generate_asset(asset, now, no_render, as_of=None):
         return ok, out
 
     # 1. data + analysis
-    icmd = ["scripts/intraday.py", asset["provider_symbols"]["yahoo"], "--name", tk,
+    icmd = ["-m", "scripts.pipeline.intraday", asset["provider_symbols"]["yahoo"], "--name", tk,
             "--hrange", "10d", "--roll-utc", str(asset.get("roll_utc", 0)),
             "--session-profile", asset["session_profile"]]
+    _civ = asset.get("chart_intervals") or []
+    if _civ:                                          # candle intervals the view is analysed from
+        icmd += ["--chart-intervals", ",".join(_civ)]
     _td_sym = (asset.get("provider_symbols") or {}).get("twelvedata")
     if _td_sym:                                   # explicit TD symbol (e.g. gold XAU/USD spot)
         icmd += ["--td-symbol", _td_sym]
@@ -495,12 +499,16 @@ def generate_asset(asset, now, no_render, as_of=None):
     # This writes the exact file scaffold reads, so the PUBLISHED confidence number learns
     # from the track record (not just the prose brief). BTC reruns use only BTC's rows;
     # an empty/young ledger yields a valid neutral context. Best-effort (never blocks).
-    lcmd = ["scripts/ledger_context.py", tk, "--ticker", tk,
+    lcmd = ["-m", "scripts.analytics.ledger_context", tk, "--ticker", tk,
             "--asset-class", asset.get("asset_class", ""), "--as-of", now_arg]
     stage("ledger_context", lcmd, timeout=60)
 
     # 4. scaffold (payload + predictions + deterministic confidence)
-    scmd = ["scripts/scaffold_payload.py", tk, "--session-profile", asset["session_profile"]]
+    scmd = ["-m", "scripts.pipeline.scaffold_payload", tk, "--session-profile", asset["session_profile"]]
+    # Scoring cadence: every daily-frequency cadence (weekday/trading_day/...) scores at the day
+    # close; weekly/monthly score at week/month end. Drives the canonical one-per-period window.
+    score_cadence = {"weekly": "weekly", "monthly": "monthly"}.get(asset.get("cadence"), "daily")
+    scmd += ["--cadence", score_cadence]
     if asset.get("forecast_window"):
         scmd += ["--forecast-window", asset["forecast_window"]]  # standard windows are a no-op
     _tfs = asset.get("timeframes") or []
@@ -514,7 +522,7 @@ def generate_asset(asset, now, no_render, as_of=None):
 
     # 5. render + QA gate (or forecast-only)
     payload = f"data/payloads/{tk}_af_payload.json"
-    rcmd = ["scripts/mvp_report.py", payload] + (["--no-render"] if no_render else [])
+    rcmd = ["-m", "scripts.pipeline.mvp_report", payload] + (["--no-render"] if no_render else [])
     ok, out = stage("mvp_report", rcmd, timeout=240)
     try:
         rec["report_id"] = json.loads(Path(ROOT / payload).read_text(encoding="utf-8-sig")).get("report_id")
@@ -717,7 +725,7 @@ def main():
         _hd = max(10, (real_now - now).days + 4)   # candle range must span the as-of window -> today
         print(f"refreshing full candles ({_hd}d) + scoring the backtest's closed windows...")
         for a in due_assets:
-            ricmd = ["scripts/intraday.py", a["provider_symbols"]["yahoo"], "--name", a["ticker"],
+            ricmd = ["-m", "scripts.pipeline.intraday", a["provider_symbols"]["yahoo"], "--name", a["ticker"],
                      "--hrange", f"{_hd}d", "--roll-utc", str(a.get("roll_utc", 0)),
                      "--session-profile", a["session_profile"]]
             _rtd = (a.get("provider_symbols") or {}).get("twelvedata")
@@ -750,6 +758,15 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=1), encoding="utf-8")
     print(f"manifest -> runs/{run_date}/run_manifest.json")
+    # Mirror the run into engine.sqlite's run-history table (best-effort; live runs only, not sandbox).
+    if not o["sandbox"]:
+        try:
+            import ledger_db
+            ledger_db.record_run(run_id, o["mode"], run_date, "ok",
+                                 generated=manifest.get("generated"), manifest=manifest,
+                                 db_path=ROOT / "ledger" / "engine.sqlite")
+        except Exception:
+            pass
     if o["mode"] == "dry_run":
         print("DRY RUN - no scoring, generation, or publish performed.")
 

@@ -23,6 +23,9 @@ Schema (per asset):
   forecast_window   FORECAST_WINDOWS                        (default "next_session")
   timeframes        list[FORECAST_WINDOWS], one prediction   (optional; default [forecast_window])
                     track per entry — the multi-timeframe set
+  chart_intervals   list[CHART_INTERVALS] candle intervals    (optional; default ["60m","1d"])
+                    the engine analyses (60m/2h/4h/8h/1d/1week/1month) — the charts the
+                    directional view is built FROM (distinct from timeframes/forecast windows)
   include_fundamentals bool                                  (optional; default: equities only)
   include_news      bool                                    (optional; default true)
   fundamentals_source  auto | twelvedata | none             (optional; default "auto")
@@ -36,6 +39,7 @@ Usage:
   assets = load_assets(enabled_only=True)
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -69,8 +73,55 @@ PUBLISH_POLICIES = ("approval_required", "auto")
 REPORT_TIERS = ("official", "watchlist", "staged", "backtest")
 FORECAST_WINDOWS = ("next_liquid_session", "next_regular_session", "rolling_24h", "next_session",
                     "next_week", "next_5_sessions")
+# Candle intervals the engine fetches + analyses (mirror of intraday.SUPPORTED_INTERVALS).
+# Distinct from FORECAST_WINDOWS: these are the charts the view is built FROM, not when a
+# prediction scores. 2h/4h/8h are resampled from 60m; 1week/1month from daily.
+CHART_INTERVALS = ("60m", "2h", "4h", "8h", "1d", "1week", "1month")
+CANONICAL_INTERVALS = ("60m", "1d")
 REQUIRED = ("id", "name", "instrument", "ticker", "provider_symbols", "asset_class",
             "session_profile", "cadence", "timezone")
+
+# --- single runtime config file (config/engine.json) ------------------------
+# One place for operator-tunable RUNTIME settings, replacing the scatter of ASSETFRAME_*/ADVISOR_*
+# knobs that used to live in .env. `.env` is now reserved for SECRETS only (DATABASE_URL, R2_*,
+# *_API_KEY, UPSTASH_*). The asset UNIVERSE stays in config/assets.json (synced from Neon) — this
+# file is settings only. Stored keyed by the legacy env-var name so every existing os.environ.get()
+# read works unchanged: apply_runtime_env() seeds the environment from this file WITHOUT overriding
+# anything already set, so the real environment (systemd EnvironmentFile, a test, an explicit export)
+# always WINS. The dashboard's set_config command writes here (engine_ops._cmd_set_config).
+DEFAULT_ENGINE_CONFIG = Path("config/engine.json")
+RUNTIME_DEFAULTS = {
+    "ADVISOR_DATA_PROVIDER": "yahoo",
+    "ASSETFRAME_BRIEF_MODEL": "claude-sonnet-4-6",
+    "ASSETFRAME_AUTHOR_BRIEFS": "1",
+    "ASSETFRAME_RETENTION_DAYS": "14",
+    "ASSETFRAME_RUN_TIMEOUT": "5400",
+    "TWELVEDATA_RATE_PER_MIN": "8",
+}
+
+
+def load_runtime_config(path=DEFAULT_ENGINE_CONFIG):
+    """Return the runtime settings: built-in defaults overlaid with config/engine.json (if present).
+    Never raises — a missing/corrupt file just yields the defaults."""
+    cfg = dict(RUNTIME_DEFAULTS)
+    p = Path(path)
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8-sig"))
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    if not str(k).startswith("_") and v is not None:
+                        cfg[str(k)] = v
+        except Exception:
+            pass
+    return cfg
+
+
+def apply_runtime_env(path=DEFAULT_ENGINE_CONFIG):
+    """Seed os.environ from config/engine.json WITHOUT overriding existing values (env wins). Call
+    once at the top of each entrypoint; spawned subprocesses then inherit the resolved settings."""
+    for k, v in load_runtime_config(path).items():
+        os.environ.setdefault(k, str(v))
 
 
 class ConfigError(ValueError):
@@ -126,6 +177,16 @@ def _validate_one(a, idx, seen_ids):
                     errs.append(f"{where}: timeframe '{tf}' not in {list(FORECAST_WINDOWS)}")
             if len(set(tfs)) != len(tfs):
                 errs.append(f"{where}: timeframes has duplicate entries {tfs}")
+    civ = a.get("chart_intervals")
+    if civ is not None:
+        if not isinstance(civ, list) or not civ:
+            errs.append(f"{where}: chart_intervals must be a non-empty list of candle intervals")
+        else:
+            for iv in civ:
+                if iv not in CHART_INTERVALS:
+                    errs.append(f"{where}: chart_interval '{iv}' not in {list(CHART_INTERVALS)}")
+            if len(set(civ)) != len(civ):
+                errs.append(f"{where}: chart_intervals has duplicate entries {civ}")
     for flag in ("include_fundamentals", "include_news"):
         v = a.get(flag)
         if v is not None and not isinstance(v, bool):
@@ -164,6 +225,12 @@ def _normalize(a):
     tfs = a.get("timeframes") or [a["forecast_window"]]
     seen = set()
     a["timeframes"] = [t for t in tfs if not (t in seen or seen.add(t))]
+    # chart_intervals: which candle intervals the engine analyses. Default = the canonical
+    # 60m + 1d pair; always force-include the pair so the pipeline's inputs are guaranteed.
+    civ = a.get("chart_intervals") or list(CANONICAL_INTERVALS)
+    seen_iv = set()
+    a["chart_intervals"] = [iv for iv in list(CANONICAL_INTERVALS) + civ
+                            if not (iv in seen_iv or seen_iv.add(iv))]
     a.setdefault("include_fundamentals", a.get("asset_class") == "equity")
     a.setdefault("include_news", True)
     a.setdefault("fundamentals_source", "auto")
@@ -199,3 +266,33 @@ def get_asset(asset_id, path=DEFAULT_CONFIG):
         if a["id"] == asset_id:
             return a
     raise ConfigError(f"asset id '{asset_id}' not found in {path}")
+
+
+# --- single runtime config file --------------------------------------------
+# config/engine.json holds the NON-SECRET runtime knobs (retention, brief authoring, run timeout,
+# brief model, data provider). Secrets (DATABASE_URL, R2_*, *_API_KEY, UPSTASH_*) stay in .env. The
+# JSON keys ARE the env var names the engine already reads, so applying the file just fills os.environ
+# for any key not already set — env always wins, so systemd EnvironmentFile / ad-hoc overrides keep
+# precedence and no read site changes. The admin "set config" command writes this same file.
+RUNTIME_CONFIG = Path("config/engine.json")
+SETTABLE_RUNTIME_KEYS = ("ASSETFRAME_RETENTION_DAYS", "ASSETFRAME_AUTHOR_BRIEFS",
+                         "ASSETFRAME_RUN_TIMEOUT", "ASSETFRAME_BRIEF_MODEL", "ADVISOR_DATA_PROVIDER",
+                         "TWELVEDATA_RATE_PER_MIN")
+
+
+def apply_runtime_env(path=RUNTIME_CONFIG):
+    """Seed os.environ from config/engine.json for any allow-listed runtime knob not already set.
+    Best-effort: a missing/invalid file is a silent no-op (the read sites keep their built-in
+    defaults). Returns the dict of values applied. Call once at entrypoint startup."""
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    applied = {}
+    for k in SETTABLE_RUNTIME_KEYS:
+        if k in raw and raw[k] not in (None, ""):
+            os.environ.setdefault(k, str(raw[k]))
+            applied[k] = str(raw[k])
+    return applied

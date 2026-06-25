@@ -36,8 +36,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import engine_ops  # reuse its DATABASE_URL resolution + .env loader + connect()
-
-ROOT = HERE.parent
+from _paths import ROOT          # repo-root anchor (scripts/__init__ shim is on sys.path under -m)
 SIM_LEDGER = ROOT / "ledger" / "sim" / "outcome_ledger.csv"
 # score_report.py drops one data/predictions/sim/scored/<report_id>.json per scored sandbox report:
 # a JSON list of {pred_id, ptype, ptext, manual, sort, outcome}. We upsert each entry into Neon
