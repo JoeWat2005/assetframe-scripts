@@ -538,7 +538,14 @@ def author_brief(ticker, analysis, memory_pack, research, social, *, model,
     client = _client(anthropic)
 
     web_uses, sys_suffix = _news_settings(include_news)
-    system = SYSTEM_PROMPT + sys_suffix
+    # Prompt caching: the SYSTEM_PROMPT (the SKILL.md authoring rules) is large (~1.3k tok) and
+    # IDENTICAL across every asset + across each pause_turn resume / repair turn within one asset.
+    # Marking it as an ephemeral cache breakpoint means the first call writes it (1.25x) and every
+    # subsequent call this run reads it at 0.1x — cutting input cost ~90% on the rules block and
+    # collapsing the per-minute token load that the multi-turn web_search loop used to re-send in
+    # full. 5-min TTL, refreshed on every hit, so a back-to-back asset run stays warm.
+    system = [{"type": "text", "text": SYSTEM_PROMPT + sys_suffix,
+               "cache_control": {"type": "ephemeral"}}]
     user = build_user_message(ticker, analysis, memory_pack, research, social, guidance)
     messages = [{"role": "user", "content": user}]
     tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": web_uses}]

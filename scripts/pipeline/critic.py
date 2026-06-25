@@ -167,7 +167,11 @@ def review_brief(asset, brief, analysis, research, *, model, max_tokens):
     client = _client(anthropic)
     try:
         resp = client.messages.create(
-            model=model, max_tokens=max_tokens, system=SYSTEM_PROMPT,
+            model=model, max_tokens=max_tokens,
+            # Prompt caching: the critic's rubric SYSTEM_PROMPT (~1k tok) is static across every
+            # asset, so cache it once per run and read it at 0.1x thereafter.
+            system=[{"type": "text", "text": SYSTEM_PROMPT,
+                     "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user",
                        "content": build_user_message(asset, brief, analysis, research)}],
         )
