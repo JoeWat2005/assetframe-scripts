@@ -50,7 +50,13 @@ from brief_writer import (_load_json, _require_sdk, _client,
 # open-ended authoring, so the cheapest + fastest model (with the highest rate-limit ceiling) fits —
 # ~80% cheaper than reviewing on Sonnet. Override with ASSETFRAME_CRITIC_MODEL (or --model).
 DEFAULT_MODEL = os.environ.get("ASSETFRAME_CRITIC_MODEL", "claude-haiku-4-5-20251001")
-DEFAULT_MAX_TOKENS = 3000
+# Output budget for the verdict. 3000 truncated rich verdicts (long 'issues' lists) mid-JSON ->
+# unparseable -> the brief wrongly degraded to needs_brief. 8000 gives ample headroom (Haiku output
+# is cheap); the retry in review_brief bumps it further on a confirmed max_tokens stop.
+try:
+    DEFAULT_MAX_TOKENS = int(os.environ.get("ASSETFRAME_CRITIC_MAX_TOKENS", "8000"))
+except (TypeError, ValueError):
+    DEFAULT_MAX_TOKENS = 8000
 DECISIONS = ("approve", "revise", "reject", "stand_aside")
 # A non-defect skip (the market call is genuinely no-trade) vs a defect rejection.
 PASS_DECISIONS = ("approve", "revise")     # exit 0
@@ -165,32 +171,47 @@ def build_user_message(asset, brief, analysis, research):
 
 
 def review_brief(asset, brief, analysis, research, *, model, max_tokens):
-    """Run the critic. Returns (verdict, telemetry). Raises SystemExit(3) on API error
-    or an unparseable/malformed verdict."""
-    anthropic = _require_sdk()
-    client = _client(anthropic)
-    try:
-        resp = client.messages.create(
-            model=model, max_tokens=max_tokens,
-            # Prompt caching: the critic's rubric SYSTEM_PROMPT (~1k tok) is static across every
-            # asset, so cache it once per run and read it at 0.1x thereafter.
-            system=[{"type": "text", "text": SYSTEM_PROMPT,
-                     "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user",
-                       "content": build_user_message(asset, brief, analysis, research)}],
-        )
-    except Exception as ex:
-        print(f"ERROR: Anthropic API call failed: {type(ex).__name__}: {ex}", file=sys.stderr)
-        sys.exit(3)
+    """Run the critic. Returns (verdict, telemetry). Raises SystemExit(3) on API error or an
+    unparseable/malformed verdict AFTER one retry. The retry matters: a verbose verdict (a long
+    'issues' list on a rich brief) can hit the output ceiling and truncate the JSON mid-object, or a
+    smaller/faster model can emit slightly malformed JSON — re-prompting once for a single COMPACT,
+    complete object (with extra headroom when it truncated) recovers it cheaply instead of dropping
+    an otherwise-valid brief to needs_brief."""
+    client = _client(_require_sdk())
+    system = [{"type": "text", "text": SYSTEM_PROMPT,   # cached rubric (static across every asset)
+               "cache_control": {"type": "ephemeral"}}]
+    base_user = build_user_message(asset, brief, analysis, research)
+    messages = [{"role": "user", "content": base_user}]
+    in_tok = out_tok = 0
+    verdict = None
+    last_errs = ["unknown error"]
 
-    u = getattr(resp, "usage", None)
-    in_tok = getattr(u, "input_tokens", 0) or 0
-    out_tok = getattr(u, "output_tokens", 0) or 0
+    for attempt in (1, 2):
+        try:
+            resp = client.messages.create(model=model, max_tokens=max_tokens, system=system,
+                                          messages=messages)
+        except Exception as ex:
+            print(f"ERROR: Anthropic API call failed: {type(ex).__name__}: {ex}", file=sys.stderr)
+            sys.exit(3)
+        u = getattr(resp, "usage", None)
+        in_tok += getattr(u, "input_tokens", 0) or 0
+        out_tok += getattr(u, "output_tokens", 0) or 0
 
-    verdict, perr = _extract_json(resp.content)
-    errs = [perr] if perr else _verdict_errors(verdict)
-    if errs:
-        print("ERROR: critic produced an invalid verdict:\n  - " + "\n  - ".join(errs),
+        verdict, perr = _extract_json(resp.content)
+        errs = [perr] if perr else _verdict_errors(verdict)
+        if not errs:
+            break
+        last_errs = errs
+        if attempt == 1:
+            # If the output hit the ceiling, the JSON was cut off — bump the budget. Always ask for a
+            # single compact, complete object so the verdict closes.
+            if getattr(resp, "stop_reason", None) == "max_tokens":
+                max_tokens = max(max_tokens, 8000)
+            messages = [{"role": "user", "content": base_user + "\n\nReturn ONLY a single, "
+                         "COMPLETE, compact JSON verdict object — no prose, no markdown fences. Keep "
+                         "the 'issues' list concise (the most important items) so the JSON closes."}]
+            continue
+        print("ERROR: critic produced an invalid verdict:\n  - " + "\n  - ".join(last_errs),
               file=sys.stderr)
         sys.exit(3)
 

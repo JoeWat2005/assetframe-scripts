@@ -112,7 +112,8 @@ BRIEF_MAX_TOKENS = _envint("ASSETFRAME_BRIEF_MAX_TOKENS", 20000)
 # Critic runs on Haiku by default: the adversarial review is a structured check, so the cheapest/
 # fastest model with the highest rate ceiling fits — ~80% cheaper than reviewing on Sonnet.
 CRITIC_MODEL = os.environ.get("ASSETFRAME_CRITIC_MODEL", "claude-haiku-4-5-20251001")
-CRITIC_MAX_TOKENS = _envint("ASSETFRAME_CRITIC_MAX_TOKENS", 3000)
+# 8000 (not 3000): a rich verdict's 'issues' list truncated mid-JSON at 3000 -> needs_brief.
+CRITIC_MAX_TOKENS = _envint("ASSETFRAME_CRITIC_MAX_TOKENS", 8000)
 
 try:
     from zoneinfo import ZoneInfo
