@@ -93,7 +93,10 @@ DEFAULT_ENGINE_CONFIG = Path("config/engine.json")
 RUNTIME_DEFAULTS = {
     "ADVISOR_DATA_PROVIDER": "yahoo",
     "ASSETFRAME_BRIEF_MODEL": "claude-sonnet-4-6",
+    "ASSETFRAME_CRITIC_MODEL": "claude-haiku-4-5-20251001",  # adversarial review = cheap/fast Haiku
     "ASSETFRAME_AUTHOR_BRIEFS": "1",
+    "ASSETFRAME_BRIEF_BATCH": "0",         # 1 = author/critique via Message Batches (no rate limit,
+                                           # 50% cheaper, scales to N assets). Sync path is the fallback.
     "ASSETFRAME_BRIEF_CONCURRENCY": "1",   # briefs authored at once (1 = safe on Anthropic Tier 1)
     "ASSETFRAME_RETENTION_DAYS": "14",
     "ASSETFRAME_RUN_TIMEOUT": "5400",

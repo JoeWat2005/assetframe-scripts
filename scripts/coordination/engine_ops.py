@@ -893,16 +893,21 @@ def _finish_request(conn, request_id, status, run_id, error):
 _SETTABLE_CONFIG_KEYS = {
     "ASSETFRAME_AUTHOR_BRIEFS", "ADVISOR_DATA_PROVIDER", "ASSETFRAME_RUN_TIMEOUT",
     "ASSETFRAME_BRIEF_MODEL", "ASSETFRAME_RETENTION_DAYS",
+    "ASSETFRAME_BRIEF_BATCH", "ASSETFRAME_CRITIC_MODEL", "ASSETFRAME_BRIEF_CONCURRENCY",
 }
 # Per-key value validators — reject a value that would brick the box via an allow-listed key. In
 # particular ASSETFRAME_RUN_TIMEOUT is int()-parsed at import; a non-integer would crash-loop the
 # poller. A key with no validator only gets the generic single-line / length check.
 _CONFIG_VALUE_VALIDATORS = {
     "ASSETFRAME_RUN_TIMEOUT": lambda v: v.isdigit() and 60 <= int(v) <= 86400,
-    # Brief model must be a Claude id (a typo here would break every brief). Allow-list shape only.
+    # Brief / critic model must be a Claude id (a typo here would break every brief). Allow-list shape.
     "ASSETFRAME_BRIEF_MODEL": lambda v: v.startswith("claude-") and 8 <= len(v) <= 60,
+    "ASSETFRAME_CRITIC_MODEL": lambda v: v.startswith("claude-") and 8 <= len(v) <= 60,
     # Local reports/runs retention in days (0 = keep everything). Bounded so a typo can't be wild.
     "ASSETFRAME_RETENTION_DAYS": lambda v: v.isdigit() and 0 <= int(v) <= 3650,
+    # Batch authoring toggle (1 = Message Batches path) + concurrent-brief cap on the sync path.
+    "ASSETFRAME_BRIEF_BATCH": lambda v: v in ("0", "1"),
+    "ASSETFRAME_BRIEF_CONCURRENCY": lambda v: v.isdigit() and 1 <= int(v) <= 16,
 }
 # tail_logs may only read these systemd units (prevents arbitrary -u injection).
 _KNOWN_POLLER_UNITS = {"assetframe-poller.service", "assetframe-poller-dev.service"}

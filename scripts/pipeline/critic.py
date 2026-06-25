@@ -42,10 +42,14 @@ import os
 import sys
 from pathlib import Path
 
-# Reuse the writer's model default + input loaders so the two stay in lock-step.
-from brief_writer import (DEFAULT_MODEL, _load_json, _require_sdk, _client,
+# Reuse the writer's input loaders + client so the two stay in lock-step.
+from brief_writer import (_load_json, _require_sdk, _client,
                           summarize_analysis, summarize_research)
 
+# The critic runs on Haiku by default: the adversarial review is a structured pass/fail check, not
+# open-ended authoring, so the cheapest + fastest model (with the highest rate-limit ceiling) fits —
+# ~80% cheaper than reviewing on Sonnet. Override with ASSETFRAME_CRITIC_MODEL (or --model).
+DEFAULT_MODEL = os.environ.get("ASSETFRAME_CRITIC_MODEL", "claude-haiku-4-5-20251001")
 DEFAULT_MAX_TOKENS = 3000
 DECISIONS = ("approve", "revise", "reject", "stand_aside")
 # A non-defect skip (the market call is genuinely no-trade) vs a defect rejection.

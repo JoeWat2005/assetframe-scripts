@@ -28,6 +28,12 @@ Each manifest job carries a token_cost block (writer + critic tokens/web-searche
 Idempotent: deterministic run_id/report_id + the scorer's dedup guard mean a re-run never
 double-scores or double-appends.
 
+Scale path (ASSETFRAME_BRIEF_BATCH=1): instead of one rate-limited Anthropic call per asset, ALL
+due briefs are authored in one Message Batch and critiqued (on Haiku) in a second — no per-minute
+rate limit, 50% cheaper, ~constant wall-clock as the universe grows. web_search + prompt caching
+still apply inside the batch. The synchronous per-asset path is the automatic fallback if a batch
+submission fails (or returns no clean outcome), so the run can never hard-stop on the batch step.
+
 Usage:
   python scripts/run_daily.py [--universe config/assets.json] [--asset <id>]
         [--asset-class fx] [--mode dry_run|score_only|generate_only|production]
@@ -57,6 +63,7 @@ import config_loader
 config_loader.apply_runtime_env(ROOT / "config" / "engine.json")
 import calendar_rules
 import memory_pack as mp
+import brief_batch   # Anthropic Message-Batches author/critique orchestrator (scale path)
 
 MODES = ("dry_run", "score_only", "generate_only", "production")
 PRED_DIR = ROOT / "data" / "predictions"
@@ -83,6 +90,29 @@ try:
 except (TypeError, ValueError):
     _BRIEF_CONCURRENCY = 1
 _BRIEF_SEM = threading.Semaphore(_BRIEF_CONCURRENCY)
+
+
+def _envint(name, default):
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# Brief authoring via the Anthropic Message Batches API (scale path). When ON, ALL due assets'
+# briefs are authored in one batch and critiqued in a second — no per-minute rate limit (batches
+# have their own pool), 50% cheaper, ~constant wall-clock as the universe grows. web_search and
+# prompt caching both still apply inside the batch. OFF (default) keeps the proven synchronous
+# per-asset path, which is ALSO the automatic fallback if a batch submission fails. Enable per box
+# in config/engine.json (ASSETFRAME_BRIEF_BATCH=1) after validating once with a sandbox backtest.
+BRIEF_BATCH = os.environ.get("ASSETFRAME_BRIEF_BATCH", "0") == "1"
+# Models/budgets for the batch path (the synchronous subprocesses read these same env vars).
+BRIEF_MODEL = os.environ.get("ASSETFRAME_BRIEF_MODEL", "claude-sonnet-4-6")
+BRIEF_MAX_TOKENS = _envint("ASSETFRAME_BRIEF_MAX_TOKENS", 20000)
+# Critic runs on Haiku by default: the adversarial review is a structured check, so the cheapest/
+# fastest model with the highest rate ceiling fits — ~80% cheaper than reviewing on Sonnet.
+CRITIC_MODEL = os.environ.get("ASSETFRAME_CRITIC_MODEL", "claude-haiku-4-5-20251001")
+CRITIC_MAX_TOKENS = _envint("ASSETFRAME_CRITIC_MAX_TOKENS", 3000)
 
 try:
     from zoneinfo import ZoneInfo
@@ -400,27 +430,42 @@ def _total_token_cost(summaries):
 
 
 # --------------------------------------------------------------- generate step
-def generate_asset(asset, now, no_render, as_of=None):
-    """Deterministic per-asset pipeline: intraday -> memory_pack -> ledger_context ->
-    [brief] -> scaffold -> confidence -> mvp_report. Returns a manifest job record (never
-    raises). When `as_of` is set the run is BACKDATED: `now` is the as-of moment and we
-    forward it to the data + scaffold stages so the prediction window is past-dated (and
-    therefore scoreable), with no look-ahead in the ledger memory."""
-    t0 = time.time()
-    tk = asset["ticker"]
-    backdated = bool(as_of)
-    now_arg = now.strftime("%Y-%m-%d %H:%M")
-    rec = {"asset_id": asset["id"], "ticker": tk, "asset_class": asset["asset_class"],
-           "report_id": None, "status": "error", "stages": {}, "errors": [],
-           "token_cost": {"input_tokens": 0, "output_tokens": 0, "web_searches": 0,
-                          "est_cost_usd": 0.0}}
+# generate_asset is factored into three shared helpers so the synchronous per-asset path and the
+# batched (Message Batches) path run IDENTICAL data-prep + scaffold/render — only the brief
+# ACQUISITION differs (one subprocess per asset vs one batch for all assets).
 
+def _new_job_rec(asset):
+    return {"asset_id": asset["id"], "ticker": asset["ticker"], "asset_class": asset["asset_class"],
+            "report_id": None, "status": "error", "stages": {}, "errors": [],
+            "token_cost": {"input_tokens": 0, "output_tokens": 0, "web_searches": 0,
+                           "est_cost_usd": 0.0}}
+
+
+def _stage_runner(rec):
+    """A `stage(name, cmd, timeout)` closure bound to one job rec (records ok/failed + errors)."""
     def stage(name, cmd, timeout=180):
         ok, out, err = _run(cmd, timeout=timeout)
         rec["stages"][name] = "ok" if ok else "failed"
         if not ok:
             rec["errors"].append({name: (err or out)[-240:]})
         return ok, out
+    return stage
+
+
+def _read_json(path):
+    """In-process JSON load (NOT brief_writer._load_json, which sys.exits on failure)."""
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except Exception:
+        return None
+
+
+def _data_prep(asset, now, as_of, rec, stage):
+    """Steps 1-2: intraday + bounded memory_pack. Returns True if intraday succeeded (analysis is
+    on disk); memory_pack is best-effort. On intraday failure sets rec['status']='data_error'."""
+    tk = asset["ticker"]
+    backdated = bool(as_of)
+    now_arg = now.strftime("%Y-%m-%d %H:%M")
 
     # 1. data + analysis
     icmd = ["-m", "scripts.pipeline.intraday", asset["provider_symbols"]["yahoo"], "--name", tk,
@@ -441,7 +486,8 @@ def generate_asset(asset, now, no_render, as_of=None):
         icmd += ["--as-of", now_arg]   # trim bars to <= the as-of moment (no look-ahead)
     ok, _ = stage("intraday", icmd, timeout=120)
     if not ok:
-        rec["status"] = "data_error"; rec["duration_s"] = round(time.time() - t0, 1); return rec
+        rec["status"] = "data_error"
+        return False
 
     # 2. bounded memory pack (for the brief writer / critic; written for audit)
     try:
@@ -451,48 +497,16 @@ def generate_asset(asset, now, no_render, as_of=None):
         rec["stages"]["memory_pack"] = "ok"
         rec["memory_pack_tokens"] = pack.get("budget", {}).get("approx_tokens")
     except Exception as ex:
-        rec["stages"]["memory_pack"] = "failed"; rec["errors"].append({"memory_pack": str(ex)[:160]})
+        rec["stages"]["memory_pack"] = "failed"
+        rec["errors"].append({"memory_pack": str(ex)[:160]})
+    return True
 
-    # 3. brief — autonomously authored + adversarially reviewed. An operator-written
-    # brief (already present) is honoured as-is. When the brief is MISSING and brief
-    # authoring is enabled, brief_writer.py + critic.py run here; on approve the brief
-    # now exists and the pipeline continues. A keyless run, a writer failure, a reject,
-    # or a stand-aside all degrade gracefully (no scaffold) with a recorded reason.
-    brief = BRIEF_DIR / f"{tk}_research_brief.json"
-    # ALWAYS author a fresh, ORIGINAL brief — never reuse a prior one. When AI authoring is enabled
-    # (the default, ASSETFRAME_AUTHOR_BRIEFS=1), purge ANY existing brief so every report AND every
-    # backtest day gets a newly written analysis (no recycled theses, ever — even on a same-date
-    # re-run). A hand-written OPERATOR brief is honoured as-is ONLY when AI authoring is disabled
-    # (ASSETFRAME_AUTHOR_BRIEFS=0), which is the manual-fallback mode.
-    run_day = now.strftime("%Y-%m-%d")
-    if BRIEF_AUTHORING and brief.exists():
-        _safe_unlink(brief)              # force a fresh, original re-author below
-    rec["brief_source"] = "operator"
-    if not brief.exists():
-        if not BRIEF_AUTHORING:
-            rec["status"] = "needs_brief"; rec["duration_s"] = round(time.time() - t0, 1); return rec
-        BRIEF_DIR.mkdir(parents=True, exist_ok=True)
-        with _BRIEF_SEM:                  # throttle concurrent Anthropic authoring (rate-limit safe)
-            ab = author_brief_step(asset, brief)
-        rec["brief_source"] = "authored"
-        rec["brief_token_cost"] = ab["token_cost"]
-        rec["token_cost"] = _sum_token_cost(ab["token_cost"])
-        if ab.get("decision"):
-            rec["critic_decision"] = ab["decision"]
-        if ab.get("critic_summary"):
-            rec["critic_summary"] = ab["critic_summary"]
-        if ab.get("issues"):
-            rec["critic_issues"] = ab["issues"]
-        if ab["status"] != "authored":
-            # writer_unavailable/brief_failed -> needs_brief (operator can supply one);
-            # brief_rejected/brief_stand_aside -> skip this asset, record why.
-            rec["status"] = ("needs_brief" if ab["status"] in ("writer_unavailable", "brief_failed")
-                             else ab["status"])
-            rec["stages"]["brief"] = "authored" if ab.get("decision") else "skipped"
-            rec["duration_s"] = round(time.time() - t0, 1)
-            return rec
-        rec["stages"]["brief"] = "authored"
-        _stamp_authored_brief(brief, run_day)   # mark fresh AI brief so tomorrow regenerates it
+
+def _finish_asset(asset, now, no_render, as_of, rec, stage):
+    """Steps 3.5-5: ledger_context + scaffold + render/QA. Sets the terminal rec['status']."""
+    tk = asset["ticker"]
+    backdated = bool(as_of)
+    now_arg = now.strftime("%Y-%m-%d %H:%M")
 
     # 3.5 per-instrument ledger context (the confidence engine's "memory"): turn THIS
     # instrument's own closed, scored windows into hit-rate priors as-of `now`. No
@@ -519,7 +533,8 @@ def generate_asset(asset, now, no_render, as_of=None):
         scmd += ["--as-of", now_arg]   # past-date the prediction window so it can be scored
     ok, _ = stage("scaffold", scmd)
     if not ok:
-        rec["status"] = "scaffold_error"; rec["duration_s"] = round(time.time() - t0, 1); return rec
+        rec["status"] = "scaffold_error"
+        return rec
 
     # 5. render + QA gate (or forecast-only)
     payload = f"data/payloads/{tk}_af_payload.json"
@@ -530,8 +545,269 @@ def generate_asset(asset, now, no_render, as_of=None):
     except Exception:
         pass
     rec["status"] = ("generated" if not no_render else "forecast_only") if ok else "qa_failed"
+    return rec
+
+
+def _apply_authored(rec, ab, brief_path, run_day):
+    """Apply an author_brief_step result dict (synchronous path) to the job rec. Returns True if the
+    brief is publishable (continue to finish), False if the asset degrades (caller returns rec)."""
+    rec["brief_source"] = "authored"
+    rec["brief_token_cost"] = ab["token_cost"]
+    rec["token_cost"] = _sum_token_cost(ab["token_cost"])
+    if ab.get("decision"):
+        rec["critic_decision"] = ab["decision"]
+    if ab.get("critic_summary"):
+        rec["critic_summary"] = ab["critic_summary"]
+    if ab.get("issues"):
+        rec["critic_issues"] = ab["issues"]
+    if ab["status"] != "authored":
+        # writer_unavailable/brief_failed -> needs_brief (operator can supply one);
+        # brief_rejected/brief_stand_aside -> skip this asset, record why.
+        rec["status"] = ("needs_brief" if ab["status"] in ("writer_unavailable", "brief_failed")
+                         else ab["status"])
+        rec["stages"]["brief"] = "authored" if ab.get("decision") else "skipped"
+        return False
+    rec["stages"]["brief"] = "authored"
+    _stamp_authored_brief(brief_path, run_day)   # mark fresh AI brief so tomorrow regenerates it
+    return True
+
+
+def generate_asset(asset, now, no_render, as_of=None):
+    """Deterministic per-asset pipeline: intraday -> memory_pack -> ledger_context ->
+    [brief] -> scaffold -> confidence -> mvp_report. Returns a manifest job record (never
+    raises). When `as_of` is set the run is BACKDATED: `now` is the as-of moment and we
+    forward it to the data + scaffold stages so the prediction window is past-dated (and
+    therefore scoreable), with no look-ahead in the ledger memory."""
+    t0 = time.time()
+    tk = asset["ticker"]
+    rec = _new_job_rec(asset)
+    stage = _stage_runner(rec)
+
+    if not _data_prep(asset, now, as_of, rec, stage):
+        rec["duration_s"] = round(time.time() - t0, 1)
+        return rec
+
+    # 3. brief — autonomously authored + adversarially reviewed. An operator-written brief (already
+    # present) is honoured as-is. ALWAYS author a fresh, ORIGINAL brief — purge any existing one so
+    # every report AND backtest day gets newly written analysis (no recycled theses). A hand-written
+    # OPERATOR brief is honoured only when AI authoring is disabled (ASSETFRAME_AUTHOR_BRIEFS=0).
+    brief = BRIEF_DIR / f"{tk}_research_brief.json"
+    run_day = now.strftime("%Y-%m-%d")
+    if BRIEF_AUTHORING and brief.exists():
+        _safe_unlink(brief)              # force a fresh, original re-author below
+    rec["brief_source"] = "operator"
+    if not brief.exists():
+        if not BRIEF_AUTHORING:
+            rec["status"] = "needs_brief"; rec["duration_s"] = round(time.time() - t0, 1); return rec
+        BRIEF_DIR.mkdir(parents=True, exist_ok=True)
+        with _BRIEF_SEM:                  # throttle concurrent Anthropic authoring (rate-limit safe)
+            ab = author_brief_step(asset, brief)
+        if not _apply_authored(rec, ab, brief, run_day):
+            rec["duration_s"] = round(time.time() - t0, 1)
+            return rec
+
+    _finish_asset(asset, now, no_render, as_of, rec, stage)
     rec["duration_s"] = round(time.time() - t0, 1)
     return rec
+
+
+def generate_due_batched(due_assets, now, no_render, as_of, workers=1):
+    """Phased generation through the Anthropic Message Batches API: prep ALL assets -> author ALL
+    briefs in one batch -> critique ALL in a second batch -> finish ALL survivors. Produces the same
+    per-asset job records generate_asset does; only the brief ACQUISITION is batched.
+
+    Raises ONLY on an author-batch submission failure (run_daily then falls back to the synchronous
+    path — nothing has been authored yet, so no double spend). A critic-batch failure is caught here
+    and degrades the authored assets to needs_brief (their briefs are not published unreviewed)."""
+    run_day = now.strftime("%Y-%m-%d")
+    sandbox = os.environ.get("ASSETFRAME_SANDBOX") == "1"
+    recs = {a["ticker"]: _new_job_rec(a) for a in due_assets}
+    stages = {a["ticker"]: _stage_runner(recs[a["ticker"]]) for a in due_assets}
+    t0 = {a["ticker"]: time.time() for a in due_assets}
+
+    def _seal(tk):
+        recs[tk]["duration_s"] = round(time.time() - t0[tk], 1)
+
+    # Phase 1 — data prep (intraday + memory_pack) for every asset, in parallel.
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futs = {pool.submit(_data_prep, a, now, as_of, recs[a["ticker"]], stages[a["ticker"]]): a
+                for a in due_assets}
+        for f in as_completed(futs):
+            f.result()   # _data_prep never raises; rec is updated in place
+
+    # Build the author work-list: prepped assets whose analysis + memory_pack are on disk.
+    items = []
+    for a in due_assets:
+        tk = a["ticker"]
+        rec = recs[tk]
+        if rec["stages"].get("intraday") != "ok":
+            _seal(tk)                     # data_error already recorded by _data_prep
+            continue
+        analysis_p = ROOT / "data" / "analysis" / f"{tk}_analysis.json"
+        mempack_p = MEMPACK_DIR / f"{tk}_memory_pack.json"
+        brief_p = BRIEF_DIR / f"{tk}_research_brief.json"
+        analysis = _read_json(analysis_p)
+        mempack = _read_json(mempack_p)
+        if analysis is None or mempack is None:
+            rec["status"] = "needs_brief"; rec["stages"]["brief"] = "skipped"
+            rec["critic_summary"] = "missing analysis or memory_pack input for the writer"
+            _seal(tk)
+            continue
+        if BRIEF_AUTHORING and brief_p.exists():
+            _safe_unlink(brief_p)         # fresh, original authoring every run
+        research_p = RESEARCH_DIR / f"{tk}_research_pack.json"
+        social_p = SOCIAL_DIR / f"{tk}_social_pack.json"
+        items.append({
+            "ticker": tk, "asset": a, "brief_path": brief_p, "analysis": analysis,
+            "memory_pack": mempack,
+            "research": _read_json(research_p) if research_p.exists() else None,
+            "social": _read_json(social_p) if social_p.exists() else None,
+            # SANDBOX always authors technical-only (no live news -> no look-ahead in a backtest).
+            "include_news": bool(a.get("include_news", True)) and not sandbox,
+        })
+
+    if not items:
+        return [recs[a["ticker"]] for a in due_assets]
+
+    # Phase 2 — author ALL briefs in one batch (+ one repair batch for schema-failers). A submission
+    # error raises out of here -> caller falls back to the synchronous writer.
+    author = brief_batch.author_briefs(
+        [{k: it[k] for k in ("ticker", "analysis", "memory_pack", "research", "social", "include_news")}
+         for it in items],
+        model=BRIEF_MODEL, max_tokens=BRIEF_MAX_TOKENS)
+
+    review_items = []
+    for it in items:
+        tk = it["ticker"]
+        rec = recs[tk]
+        res = author.get(tk) or {"brief": None, "telemetry": {}, "error": "no batch result"}
+        rec["brief_source"] = "authored"
+        rec["brief_token_cost"] = {"writer": [res.get("telemetry") or {}], "critic": []}
+        if not res.get("brief"):
+            rec["token_cost"] = _sum_token_cost(rec["brief_token_cost"])
+            rec["status"] = "needs_brief"; rec["stages"]["brief"] = "skipped"
+            rec["critic_summary"] = (res.get("error") or "brief authoring failed")[:240]
+            _seal(tk)
+            continue
+        try:
+            it["brief_path"].parent.mkdir(parents=True, exist_ok=True)
+            it["brief_path"].write_text(
+                json.dumps(res["brief"], ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        except Exception as ex:
+            rec["token_cost"] = _sum_token_cost(rec["brief_token_cost"])
+            rec["status"] = "needs_brief"; rec["stages"]["brief"] = "skipped"
+            rec["critic_summary"] = f"could not write authored brief: {ex}"[:240]
+            _seal(tk)
+            continue
+        it["_brief"] = res["brief"]
+        review_items.append(it)
+
+    # Phase 3 — critique ALL authored briefs in one batch (Haiku). A batch-level failure degrades the
+    # authored assets to needs_brief rather than publishing them unreviewed (mirrors the sync path's
+    # writer_unavailable on a critic miss) — and avoids re-authoring (the briefs are already paid for).
+    if review_items:
+        try:
+            review = brief_batch.review_briefs(
+                [{"ticker": it["ticker"], "brief": it["_brief"], "analysis": it["analysis"],
+                  "research": it["research"]} for it in review_items],
+                model=CRITIC_MODEL, max_tokens=CRITIC_MAX_TOKENS)
+        except Exception as ex:
+            print(f"  critic batch failed ({type(ex).__name__}: {ex}); "
+                  f"authored briefs degrade to needs_brief")
+            review = {it["ticker"]: None for it in review_items}
+    else:
+        review = {}
+
+    survivors = []
+    for it in review_items:
+        tk = it["ticker"]
+        rec = recs[tk]
+        verdict = review.get(tk)
+        critic_tele = (verdict or {}).get("_telemetry") or {}
+        rec["brief_token_cost"]["critic"] = [critic_tele] if critic_tele else []
+        rec["token_cost"] = _sum_token_cost(rec["brief_token_cost"])
+        if not verdict or not verdict.get("decision"):
+            rec["status"] = "needs_brief"; rec["stages"]["brief"] = "authored"
+            rec["critic_summary"] = "critic unavailable for this brief"
+            _seal(tk)
+            continue
+        decision = verdict["decision"]
+        rec["critic_decision"] = decision
+        rec["critic_summary"] = verdict.get("summary", "") or ""
+        if verdict.get("issues"):
+            rec["critic_issues"] = verdict["issues"]
+        if decision in ("approve", "revise"):
+            rec["stages"]["brief"] = "authored"
+            _stamp_authored_brief(it["brief_path"], run_day)
+            survivors.append(it)
+        elif decision == "stand_aside":
+            rec["status"] = "brief_stand_aside"; rec["stages"]["brief"] = "authored"
+            rec["critic_summary"] = verdict.get("stand_aside_reason") or rec["critic_summary"]
+            _safe_unlink(it["brief_path"]); _seal(tk)
+        else:                              # reject (or anything unexpected)
+            rec["status"] = "brief_rejected"; rec["stages"]["brief"] = "authored"
+            _safe_unlink(it["brief_path"]); _seal(tk)
+
+    # Phase 4 — finish (ledger_context + scaffold + render) every survivor, in parallel.
+    def _fin(it):
+        _finish_asset(it["asset"], now, no_render, as_of, recs[it["ticker"]], stages[it["ticker"]])
+        _seal(it["ticker"])
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        for f in as_completed([pool.submit(_fin, it) for it in survivors]):
+            f.result()
+
+    for a in due_assets:                   # safety net: every rec carries a duration
+        recs[a["ticker"]].setdefault("duration_s", round(time.time() - t0[a["ticker"]], 1))
+    return [recs[a["ticker"]] for a in due_assets]
+
+
+def _job_line(rec):
+    """One status line per asset for the run log / admin console. Surfaces WHY an asset didn't
+    generate (needs_brief / brief_rejected / *_error) so a failure is self-diagnosing."""
+    note = ""
+    if rec["status"] not in ("generated", "forecast_only"):
+        bits = []
+        if rec.get("critic_decision"):
+            bits.append(f"critic={rec['critic_decision']}")
+        reason = rec.get("critic_summary")
+        if not reason and rec.get("errors"):
+            reason = "; ".join(str(e) for e in rec["errors"])
+        if reason:
+            bits.append(str(reason)[:240])
+        if bits:
+            note = "  ->  " + " | ".join(bits)
+    src = rec.get("brief_source") or ""
+    src_tag = f"[{src}]" if src else ""
+    return (f"  {rec['ticker']:8} {rec['status']:14} {src_tag:12} "
+            f"{rec.get('report_id') or ''} ({rec.get('duration_s')}s){note}")
+
+
+def _generate_due(due_assets, now, no_render, as_of, workers):
+    """Generate every due asset, returning the list of job records. Uses the Message-Batches path
+    when enabled (ASSETFRAME_BRIEF_BATCH=1), with a robust fall back to the synchronous per-asset
+    path on ANY batch failure — a submission error, or a 'no clean outcome' result (the signature of
+    a broken batch parse). A genuinely quiet day (a generated/rejected/stand_aside present) is NOT
+    treated as a failure."""
+    if BRIEF_BATCH and BRIEF_AUTHORING and due_assets:
+        jobs = None
+        try:
+            jobs = generate_due_batched(due_assets, now, no_render, as_of, workers=workers)
+        except Exception as ex:
+            print(f"  brief-batch path failed ({type(ex).__name__}: {ex}); "
+                  f"falling back to synchronous per-asset authoring")
+            jobs = None
+        if jobs is not None:
+            if any(j["status"] in ("generated", "forecast_only", "brief_rejected", "brief_stand_aside")
+                   for j in jobs):
+                return jobs
+            print("  brief-batch produced no clean outcomes; falling back to synchronous authoring")
+
+    jobs = []
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futs = {pool.submit(generate_asset, a, now, no_render, as_of): a for a in due_assets}
+        for f in as_completed(futs):
+            jobs.append(f.result())
+    return jobs
 
 
 # --------------------------------------------------------------- storage retention
@@ -678,32 +954,11 @@ def main():
                 print(f"  twelvedata low-rate tier: clamping workers {o['workers']} -> 1 "
                       f"(set TWELVEDATA_RATE_PER_MIN to your plan's limit, e.g. 55 for Grow)")
                 o["workers"] = 1
-        print(f"generating {len(due_assets)} due asset(s) with {o['workers']} worker(s)...")
-        jobs = []
-        with ThreadPoolExecutor(max_workers=max(1, o["workers"])) as pool:
-            futs = {pool.submit(generate_asset, a, now, o["no_render"], o["as_of"]): a for a in due_assets}
-            for f in as_completed(futs):
-                rec = f.result()
-                jobs.append(rec)
-                # Surface WHY an asset didn't generate (needs_brief / brief_rejected /
-                # *_error) on the status line so the reason reaches the run log_excerpt and the
-                # admin console — otherwise a failure shows only "needs_brief" with no diagnosis.
-                note = ""
-                if rec["status"] not in ("generated", "forecast_only"):
-                    bits = []
-                    if rec.get("critic_decision"):
-                        bits.append(f"critic={rec['critic_decision']}")
-                    reason = rec.get("critic_summary")
-                    if not reason and rec.get("errors"):
-                        reason = "; ".join(str(e) for e in rec["errors"])
-                    if reason:
-                        bits.append(str(reason)[:240])
-                    if bits:
-                        note = "  ->  " + " | ".join(bits)
-                src = rec.get("brief_source") or ""
-                src_tag = f"[{src}]" if src else ""
-                print(f"  {rec['ticker']:8} {rec['status']:14} {src_tag:12} "
-                      f"{rec.get('report_id') or ''} ({rec.get('duration_s')}s){note}")
+        _batch_tag = " [batch]" if (BRIEF_BATCH and BRIEF_AUTHORING) else ""
+        print(f"generating {len(due_assets)} due asset(s) with {o['workers']} worker(s){_batch_tag}...")
+        jobs = _generate_due(due_assets, now, o["no_render"], o["as_of"], o["workers"])
+        for rec in sorted(jobs, key=lambda r: r["asset_id"]):
+            print(_job_line(rec))
         manifest["jobs"] = sorted(jobs, key=lambda r: r["asset_id"])
         manifest["generated"] = sum(1 for j in jobs if j["status"] in ("generated", "forecast_only"))
         manifest["needs_brief"] = [j["ticker"] for j in jobs if j["status"] == "needs_brief"]
