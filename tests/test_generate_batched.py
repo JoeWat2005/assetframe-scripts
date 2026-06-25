@@ -11,9 +11,44 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import json
+
 import run_daily as RD
 
 NOW = datetime(2026, 6, 25, 8, 0, tzinfo=timezone.utc)
+
+
+# --- regression: _parse_last_json must read the critic's PRETTY-PRINTED verdict ----------------
+# critic.py prints json.dumps({**verdict, "_telemetry": telemetry}, indent=1). The last '{' is the
+# nested _telemetry object; the old rfind('{') parsed THAT (no "decision") and silently dropped a
+# good verdict to needs_brief.
+
+def test_parse_last_json_pretty_critic_verdict():
+    verdict = {"decision": "revise", "summary": "minor edits",
+               "issues": [{"severity": "low", "field": "thesis", "problem": "x", "fix": "y"}],
+               "publish_blockers": []}
+    telemetry = {"model": "claude-haiku-4-5-20251001", "input_tokens": 11277, "output_tokens": 1871}
+    stdout = json.dumps({**verdict, "_telemetry": telemetry}, ensure_ascii=False, indent=1)
+    parsed = RD._parse_last_json(stdout)
+    assert parsed.get("decision") == "revise"
+    assert parsed.get("_telemetry", {}).get("model") == "claude-haiku-4-5-20251001"
+
+
+def test_parse_last_json_single_line_writer_summary():
+    summary = json.dumps({"ok": True, "out": "x.json", "ticker": "BTC",
+                          "model": "claude-sonnet-4-6", "input_tokens": 5, "output_tokens": 9})
+    assert RD._parse_last_json(summary).get("ticker") == "BTC"
+
+
+def test_parse_last_json_ignores_leading_log_lines():
+    text = "INFO starting\nWARN something {not json}\n" + json.dumps({"decision": "approve",
+                                                                      "summary": "ok"})
+    assert RD._parse_last_json(text).get("decision") == "approve"
+
+
+def test_parse_last_json_empty():
+    assert RD._parse_last_json("") == {}
+    assert RD._parse_last_json("no json here") == {}
 
 
 def _asset(tk, cls="crypto"):

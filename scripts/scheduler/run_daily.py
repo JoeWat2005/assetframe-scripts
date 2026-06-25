@@ -142,16 +142,29 @@ def _run_rc(cmd, timeout=180):
 
 
 def _parse_last_json(text):
-    """Best-effort: parse the last JSON object printed on a child's stdout."""
+    """Best-effort: parse the last TOP-LEVEL JSON object printed on a child's stdout.
+
+    Must NOT use rfind('{'): the critic prints its verdict pretty-printed (indent=1), so the last
+    '{' is a NESTED object (e.g. "_telemetry") — slicing from there yields a sub-object that parses
+    fine but lacks "decision", silently dropping a good verdict to needs_brief. Instead scan for each
+    top-level '{', raw_decode it (which consumes the whole object incl. its nested braces), and
+    return the last one that decoded — robust to both pretty-printed and single-line output."""
     if not text:
         return {}
-    i = text.rfind("{")
-    if i == -1:
-        return {}
-    try:
-        return json.loads(text[i:])
-    except Exception:
-        return {}
+    dec = json.JSONDecoder()
+    out, idx, n = {}, 0, len(text)
+    while True:
+        b = text.find("{", idx)
+        if b == -1:
+            break
+        try:
+            obj, end = dec.raw_decode(text, b)
+            if isinstance(obj, dict):
+                out = obj
+            idx = max(end, b + 1)
+        except json.JSONDecodeError:
+            idx = b + 1
+    return out
 
 
 def parse_args(argv):
