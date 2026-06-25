@@ -94,6 +94,7 @@ RUNTIME_DEFAULTS = {
     "ADVISOR_DATA_PROVIDER": "yahoo",
     "ASSETFRAME_BRIEF_MODEL": "claude-sonnet-4-6",
     "ASSETFRAME_AUTHOR_BRIEFS": "1",
+    "ASSETFRAME_BRIEF_CONCURRENCY": "1",   # briefs authored at once (1 = safe on Anthropic Tier 1)
     "ASSETFRAME_RETENTION_DAYS": "14",
     "ASSETFRAME_RUN_TIMEOUT": "5400",
     "TWELVEDATA_RATE_PER_MIN": "8",

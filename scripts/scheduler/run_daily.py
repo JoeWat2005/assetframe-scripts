@@ -44,6 +44,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -71,6 +72,17 @@ LEDGER = ROOT / "ledger" / "outcome_ledger.csv"
 BRIEF_AUTHORING = os.environ.get("ASSETFRAME_AUTHOR_BRIEFS", "1") != "0"
 WRITER_TIMEOUT = 600        # web_search authoring can be slow
 CRITIC_TIMEOUT = 300
+
+# Throttle the (Anthropic, rate-limited) brief authoring across the worker threads. The pipeline
+# parallelises freely (intraday fetches etc.), but multiple briefs authoring AT ONCE burst past the
+# API's per-minute token limit on a low usage tier and all fail. This semaphore caps how many briefs
+# author concurrently. Default 1 = fully sequential briefs (safe on Anthropic Tier 1); raise
+# ASSETFRAME_BRIEF_CONCURRENCY (config/engine.json) on a higher tier for speed.
+try:
+    _BRIEF_CONCURRENCY = max(1, int(os.environ.get("ASSETFRAME_BRIEF_CONCURRENCY", "1")))
+except (TypeError, ValueError):
+    _BRIEF_CONCURRENCY = 1
+_BRIEF_SEM = threading.Semaphore(_BRIEF_CONCURRENCY)
 
 try:
     from zoneinfo import ZoneInfo
@@ -460,7 +472,8 @@ def generate_asset(asset, now, no_render, as_of=None):
         if not BRIEF_AUTHORING:
             rec["status"] = "needs_brief"; rec["duration_s"] = round(time.time() - t0, 1); return rec
         BRIEF_DIR.mkdir(parents=True, exist_ok=True)
-        ab = author_brief_step(asset, brief)
+        with _BRIEF_SEM:                  # throttle concurrent Anthropic authoring (rate-limit safe)
+            ab = author_brief_step(asset, brief)
         rec["brief_source"] = "authored"
         rec["brief_token_cost"] = ab["token_cost"]
         rec["token_cost"] = _sum_token_cost(ab["token_cost"])
