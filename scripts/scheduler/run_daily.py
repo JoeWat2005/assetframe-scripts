@@ -465,18 +465,14 @@ def generate_asset(asset, now, no_render, as_of=None):
     # now exists and the pipeline continues. A keyless run, a writer failure, a reject,
     # or a stand-aside all degrade gracefully (no scaffold) with a recorded reason.
     brief = BRIEF_DIR / f"{tk}_research_brief.json"
-    # Fresh brief per day: an AI-AUTHORED brief is regenerated each run-date so the WRITTEN
-    # analysis is fresh daily (downstream prices/levels/predictions are always recomputed; the
-    # prose must update too). A hand-written OPERATOR brief (no _af_authored marker) is honoured
-    # as-is and never auto-purged. Re-running the same date reuses today's brief (no double spend).
+    # ALWAYS author a fresh, ORIGINAL brief — never reuse a prior one. When AI authoring is enabled
+    # (the default, ASSETFRAME_AUTHOR_BRIEFS=1), purge ANY existing brief so every report AND every
+    # backtest day gets a newly written analysis (no recycled theses, ever — even on a same-date
+    # re-run). A hand-written OPERATOR brief is honoured as-is ONLY when AI authoring is disabled
+    # (ASSETFRAME_AUTHOR_BRIEFS=0), which is the manual-fallback mode.
     run_day = now.strftime("%Y-%m-%d")
-    if brief.exists():
-        try:
-            _ex = json.loads(brief.read_text(encoding="utf-8-sig"))
-        except Exception:
-            _ex = {}
-        if _ex.get("_af_authored") and _ex.get("_af_date") != run_day:
-            _safe_unlink(brief)          # stale auto-brief -> re-author fresh below
+    if BRIEF_AUTHORING and brief.exists():
+        _safe_unlink(brief)              # force a fresh, original re-author below
     rec["brief_source"] = "operator"
     if not brief.exists():
         if not BRIEF_AUTHORING:
