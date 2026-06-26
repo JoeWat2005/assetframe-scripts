@@ -1,11 +1,13 @@
 [Unit]
-Description=Fire the AssetFrame daily scheduled run at 05:00 UTC
+Description=Fire the AssetFrame daily scheduled run at 04:00 UTC
 Documentation=https://github.com/JoeWat2005/assetframe-scripts
 
 [Timer]
-# 05:00 UTC every day. OnCalendar is interpreted in the timer's timezone; pin it to UTC
-# so it is independent of the VM's local time (set the VM to UTC anyway — see README).
-OnCalendar=*-*-* 05:00:00 UTC
+# 04:00 UTC every day. Why 04:00: reports must be LIVE for UK traders heading to work (~7-8am UK =
+# 06:00-07:00 UTC). The batch authoring path is asynchronous (~1.5-2h end-to-end), so a 04:00 start
+# publishes by ~06:00 UTC = ~07:00 UK — the pre-LSE-open morning slot. OnCalendar is in the timer's
+# timezone; pin it to UTC so it is independent of VM local time (set the VM to UTC anyway).
+OnCalendar=*-*-* 04:00:00 UTC
 # If the VM was asleep/off at 05:00 (or rebooted past it), run as soon as it can.
 Persistent=true
 # Small jitter so we are not hammering data providers at the exact top of the minute.

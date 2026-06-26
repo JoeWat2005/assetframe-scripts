@@ -14,8 +14,12 @@ ExecStart=/opt/assetframe-scripts/.venv/bin/python -m scripts.scheduler.schedule
 # ------------------------------------------------------------------------
 
 Environment=PYTHONUNBUFFERED=1
-# A full batch (score + generate every due asset, with brief authoring) can run long.
-TimeoutStartSec=5400
+# A full BATCH run (score + author/critique every due asset via the async Message-Batches API) can
+# legitimately run 1.5-2h+, because batch latency is queue-dependent. 3h ceiling gives comfortable
+# headroom so the run never gets SIGKILL'd mid-publish (which orphans the engine_runs row at
+# 'running'). Keep ASSETFRAME_RUN_TIMEOUT (engine.json) <= this so the engine's own kill fires first
+# and records a clean status. Lower both to ~1800 if you switch to the synchronous path.
+TimeoutStartSec=10800
 
 NoNewPrivileges=true
 ProtectSystem=full

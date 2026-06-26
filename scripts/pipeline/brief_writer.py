@@ -42,6 +42,8 @@ import os
 import sys
 from pathlib import Path
 
+from _paths import ROOT     # repo-root anchor (for the shared market-weather pack)
+
 # Brief-writer model. Token-efficient default; override with ASSETFRAME_BRIEF_MODEL (or --model).
 # Sonnet 4.6 gives strong market analysis at a fraction of Opus's cost; set
 # "claude-haiku-4-5-20251001" for maximum savings, or "claude-opus-4-8" for maximum quality.
@@ -436,13 +438,31 @@ Reminders: keep free_bullets / free_scenarios PLAIN. Describe levels in words. E
 used_in_thesis claim needs a real source and a strong status. Output the JSON object ONLY."""
 
 
-def build_user_message(ticker, analysis, memory_pack, research, social, guidance):
+def _load_market_weather():
+    """Best-effort read of the shared daily market-weather pack (intermarket + overnight tone). A
+    SANDBOX/backtest must NOT see CURRENT context (look-ahead), so it returns {} there; a missing
+    file also yields {}."""
+    if os.environ.get("ASSETFRAME_SANDBOX") == "1":
+        return {}
+    try:
+        return json.loads((ROOT / "data" / "market_weather.json").read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+
+
+def build_user_message(ticker, analysis, memory_pack, research, social, guidance, market_weather=None):
     """Assemble the compact context block + the schema + (optional) critic guidance."""
+    if market_weather is None:
+        market_weather = _load_market_weather()
     ctx = {
-        "instruction": (f"Author the AssetFrame research brief for {ticker}. Research the "
-                        "current macro and asset-specific picture with web_search, then write "
-                        "the brief. Cite real source URLs in claims[]. Author intent and prose "
-                        "only — never prices, levels, R:R or a confidence number."),
+        "instruction": (f"Author the AssetFrame research brief for {ticker}. FIRST read the "
+                        "market_weather block (the intermarket backdrop + overnight/Asian session "
+                        "tone) and let it tilt the call. Then research the asset-specific picture AND "
+                        "today's scheduled high-impact macro events (the calendar — CPI/jobs/central "
+                        "banks/earnings, with times) via web_search, and surface the key catalysts + "
+                        "how they could move the session. Cite real source URLs in claims[]. Author "
+                        "intent and prose only — never prices, levels, R:R or a confidence number."),
+        "market_weather": market_weather,
         "market_context": summarize_analysis(analysis),
         "memory_pack": memory_pack,
         "research_pack": summarize_research(research),

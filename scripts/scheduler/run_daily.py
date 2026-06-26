@@ -996,6 +996,22 @@ def main():
                 print(f"  twelvedata low-rate tier: clamping workers {o['workers']} -> 1 "
                       f"(set TWELVEDATA_RATE_PER_MIN to your plan's limit, e.g. 55 for Grow)")
                 o["workers"] = 1
+        # Market weather: ONE shared intermarket + overnight-session snapshot for every brief this
+        # run (risk tone, Asia, dollar, yields, vol, oil) — the macro backdrop a pre-open note leads
+        # with. LIVE only: a backdated/sandbox run must NOT fetch CURRENT context (look-ahead), so it
+        # is skipped there (the brief loader also returns {} under sandbox). Best-effort; never blocks.
+        if not o["sandbox"] and not o["as_of"]:
+            try:
+                import market_context
+                mw = market_context.build_market_weather(now)
+                market_context.OUT.parent.mkdir(parents=True, exist_ok=True)
+                market_context.OUT.write_text(json.dumps(mw, ensure_ascii=False, indent=1),
+                                              encoding="utf-8")
+                print(f"  market weather: {mw.get('risk_tone')} "
+                      f"({len(mw.get('overnight_recap', {})) + len(mw.get('macro_drivers', {}))} instruments)")
+            except Exception as ex:
+                print(f"  market weather skipped: {str(ex)[:120]}")
+
         _batch_tag = " [batch]" if (BRIEF_BATCH and BRIEF_AUTHORING) else ""
         print(f"generating {len(due_assets)} due asset(s) with {o['workers']} worker(s){_batch_tag}...")
         jobs = _generate_due(due_assets, now, o["no_render"], o["as_of"], o["workers"])
