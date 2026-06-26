@@ -146,9 +146,11 @@ def _run_batch(client, reqs, *, label, poll_interval, deadline):
     batch polling can't overrun the systemd run timeout and get the whole run SIGTERM'd mid-poll."""
     if not reqs:
         return {}, {}
-    # Bound each poll HTTP call so a hung retrieve/results can't block indefinitely past the deadline.
+    # Bound EVERY batch HTTP call (create + retrieve + results) so a hung submission/poll can't block
+    # indefinitely past the deadline — the un-wrapped client would submit at the SDK default (600s) x
+    # max_retries=8, which is effectively unbounded.
     poll = client.with_options(timeout=120.0) if hasattr(client, "with_options") else client
-    batch = client.messages.batches.create(
+    batch = poll.messages.batches.create(
         requests=[{"custom_id": cid, "params": params} for cid, params in reqs])
     bid = batch.id
 
@@ -168,6 +170,8 @@ def _run_batch(client, reqs, *, label, poll_interval, deadline):
     msgs, errs = {}, {}
     for r in poll.messages.batches.results(bid):
         cid = getattr(r, "custom_id", None)
+        if not cid:                        # a result with no custom_id can't be matched — skip, don't
+            continue                       # let multiple None-cid rows collide on one key + drop assets
         res = getattr(r, "result", None)
         rt = getattr(res, "type", None)
         if rt == "succeeded":
@@ -262,10 +266,54 @@ def author_briefs(items, *, model, max_tokens, poll_interval=None, deadline=None
 
 # --------------------------------------------------------------------- critique
 
+# Re-prompt directive for the critic repair round — mirrors critic.review_brief's attempt-2 text.
+_CRITIC_REPAIR_DIRECTIVE = ("\n\nReturn ONLY a single, COMPLETE, compact JSON verdict object — no "
+                            "prose, no markdown fences. Keep the 'issues' list concise (the most "
+                            "important items) so the JSON closes.")
+
+
+def _critic_round(client, items, *, model, max_tokens, extra_directive, poll_interval, deadline):
+    """One critic batch. Returns {ticker: {"verdict": dict|None, "failed": bool}} where failed=True
+    means the verdict was missing / unparseable / malformed (eligible for a repair round)."""
+    reqs, id2tk = [], {}
+    for it in items:
+        tk = it["ticker"]
+        cid = _cid(tk, id2tk)
+        system = [{"type": "text", "text": cr.SYSTEM_PROMPT,
+                   "cache_control": {"type": "ephemeral"}}]
+        user = cr.build_user_message(tk, it["brief"], it.get("analysis"), it.get("research"))
+        if extra_directive:
+            user += extra_directive
+        reqs.append((cid, {"model": model, "max_tokens": max_tokens, "system": system,
+                           "messages": [{"role": "user", "content": user}]}))
+    msgs, _errs = _run_batch(client, reqs, label="critic", poll_interval=poll_interval, deadline=deadline)
+
+    out = {}
+    for cid, tk in id2tk.items():
+        if cid not in msgs:
+            out[tk] = {"verdict": None, "failed": True}
+            continue
+        verdict, perr = cr._extract_json(msgs[cid].content)
+        if perr or cr._verdict_errors(verdict):
+            out[tk] = {"verdict": None, "failed": True}
+            continue
+        # Same defensive coherence guard as critic.review_brief: an approve must carry no blockers.
+        if verdict["decision"] == "approve" and verdict.get("publish_blockers"):
+            verdict["decision"] = "revise"
+            verdict.setdefault("summary", "")
+            verdict["summary"] += " [downgraded approve->revise: publish_blockers were present]"
+        verdict["_telemetry"] = _telemetry(msgs[cid], model)
+        out[tk] = {"verdict": verdict, "failed": False}
+    return out
+
+
 def review_briefs(items, *, model, max_tokens, poll_interval=None, deadline=None):
-    """Critique every brief in ONE batch. Returns {ticker: verdict_dict|None} (None == errored /
-    expired / unparseable / malformed verdict — the asset then degrades to needs_brief, matching the
-    synchronous path's 'critic gave no usable decision' behaviour). Raises on submission/timeout."""
+    """Critique every brief in ONE batch (+ ONE repair batch for truncated/malformed verdicts).
+    Returns {ticker: verdict_dict|None} (None == still unusable after the repair — the asset then
+    degrades to needs_brief). The repair round is the CRITICAL parity with the synchronous critic's
+    attempt-2 retry: a verbose adversarial verdict (common on technical crypto/FX briefs) can hit the
+    output ceiling and truncate the JSON; without the retry that silently drops the brief. Raises on
+    submission/timeout."""
     poll_interval = poll_interval or _poll_s()
     if deadline is None:
         deadline = time.time() + _batch_timeout_s()
@@ -274,31 +322,17 @@ def review_briefs(items, *, model, max_tokens, poll_interval=None, deadline=None
     deadline = max(deadline, time.time() + 300)
     client = bw._client(bw._require_sdk())
 
-    reqs, id2tk = [], {}
-    for it in items:
-        tk = it["ticker"]
-        cid = _cid(tk, id2tk)
-        system = [{"type": "text", "text": cr.SYSTEM_PROMPT,
-                   "cache_control": {"type": "ephemeral"}}]
-        user = cr.build_user_message(tk, it["brief"], it.get("analysis"), it.get("research"))
-        reqs.append((cid, {"model": model, "max_tokens": max_tokens, "system": system,
-                           "messages": [{"role": "user", "content": user}]}))
-    msgs, _errs = _run_batch(client, reqs, label="critic", poll_interval=poll_interval, deadline=deadline)
+    by_tk = {it["ticker"]: it for it in items}
+    r1 = _critic_round(client, items, model=model, max_tokens=max_tokens, extra_directive="",
+                       poll_interval=poll_interval, deadline=deadline)
 
-    out = {}
-    for cid, tk in id2tk.items():
-        if cid not in msgs:
-            out[tk] = None
-            continue
-        verdict, perr = cr._extract_json(msgs[cid].content)
-        if perr or cr._verdict_errors(verdict):
-            out[tk] = None
-            continue
-        # Same defensive coherence guard as critic.review_brief: an approve must carry no blockers.
-        if verdict["decision"] == "approve" and verdict.get("publish_blockers"):
-            verdict["decision"] = "revise"
-            verdict.setdefault("summary", "")
-            verdict["summary"] += " [downgraded approve->revise: publish_blockers were present]"
-        verdict["_telemetry"] = _telemetry(msgs[cid], model)
-        out[tk] = verdict
-    return out
+    # Repair: re-critique the failed verdicts ONCE, demanding a compact COMPLETE object (with a >=8000
+    # token floor). The compact ask is what recovers a verbose verdict that truncated.
+    repair = [by_tk[tk] for tk, r in r1.items() if r["failed"]]
+    if repair:
+        r2 = _critic_round(client, repair, model=model, max_tokens=max(max_tokens, 8000),
+                           extra_directive=_CRITIC_REPAIR_DIRECTIVE, poll_interval=poll_interval,
+                           deadline=deadline)
+        r1.update(r2)
+
+    return {tk: r["verdict"] for tk, r in r1.items()}

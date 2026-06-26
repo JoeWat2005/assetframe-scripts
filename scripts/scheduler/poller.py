@@ -149,11 +149,13 @@ def loop(interval):
                 with engine_ops.connect() as conn:
                     engine_ops.clear_wake()   # going to Neon now; a request enqueued mid-drain re-sets it
                     if not reaped:
-                        # First Neon pass of this process: clear any phantom 'running' command left by
-                        # the process we just replaced, and rebuild config/assets.json from Neon so the
-                        # box's universe always reflects the dashboard after a deploy/restart (the
-                        # git-tracked config/assets.json is only a bootstrap default).
+                        # First Neon pass of this process: clear any phantom 'running' command OR run
+                        # left by the process we just replaced (a restart mid-run freezes the row at
+                        # 'running' forever), and rebuild config/assets.json from Neon so the box's
+                        # universe always reflects the dashboard after a deploy/restart (the git-tracked
+                        # config/assets.json is only a bootstrap default).
                         engine_ops.reap_stale_commands(conn)
+                        engine_ops.reap_stale_runs(conn)
                         try:
                             _ok, _msg = engine_ops._sync_assets_from_neon(conn)
                             _log(f"startup config sync: {_msg}")

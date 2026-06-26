@@ -962,6 +962,29 @@ def reap_stale_commands(conn):
         pass
 
 
+def reap_stale_runs(conn):
+    """Called once on poller startup: mark any engine_runs left 'running' by a PREVIOUS process as
+    'failed'. A run's outcome-write happens IN the poller process (run_and_record / run_backtest_batch),
+    so if the poller is SIGKILLed mid-run (systemctl restart's 120s TimeoutStopSec elapsing while a
+    long BATCH run is in flight, an OOM, or a host reboot) the row is frozen at 'running'/finished_at
+    NULL forever — nothing else ever reconciles it (the symptom: backtests stuck 'running' a day on).
+    The poller is single-threaded and takes the .run.lock per run, so at startup NO run can still be
+    alive: any 'running' row is provably orphaned, so a blanket sweep is safe (same logic as
+    reap_stale_commands). Also clears a stale engine_state.current_run_id. Best-effort; a missing
+    table is a no-op."""
+    try:
+        conn.execute(
+            "UPDATE engine_runs SET status = 'failed', "
+            "  errors = coalesce(errors, 'interrupted (poller restarted mid-run)'), "
+            "  finished_at = now() WHERE status = 'running'")
+    except Exception:
+        pass
+    try:
+        set_current_run(conn, None)
+    except Exception:
+        pass
+
+
 def run_command(conn, row):
     """Execute one claimed engine_command and record the outcome on the row. Never raises.
 

@@ -226,6 +226,22 @@ def test_review_approve_with_blockers_downgrades(monkeypatch):
     assert out["BTC"]["decision"] == "revise"
 
 
+def test_review_truncated_then_repair_recovers(monkeypatch):
+    # round 1 returns a malformed verdict (truncated); the repair round returns a valid one.
+    valid = {"decision": "approve", "summary": "clean", "issues": []}
+    fake = _install(monkeypatch, lambda reqs, rnd:
+                    [_result(r["custom_id"],
+                             text=('{"decision": "approve", "issues": [{"x":' if rnd == 1
+                                   else json.dumps(valid))) for r in reqs])
+    out = BB.review_briefs([_critic_item("BTC")], model="m", max_tokens=100,
+                           poll_interval=1, deadline=time.time() + 10)
+    assert fake.round == 2                       # a critic repair batch was submitted
+    assert out["BTC"]["decision"] == "approve"   # recovered instead of dropping to needs_brief
+    # the repair request carried the compact-JSON directive
+    repair_user = fake.created[1][0]["params"]["messages"][0]["content"]
+    assert "compact JSON verdict" in repair_user
+
+
 def test_review_malformed_is_none(monkeypatch):
     _install(monkeypatch, lambda reqs, rnd:
              [_result(r["custom_id"], text=json.dumps({"decision": "maybe"})) for r in reqs])

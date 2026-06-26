@@ -826,8 +826,11 @@ def _generate_due(due_assets, now, no_render, as_of, workers):
     when enabled (ASSETFRAME_BRIEF_BATCH=1), with a robust fall back to the synchronous per-asset
     path on ANY batch failure — a submission error, or a 'no clean outcome' result (the signature of
     a broken batch parse). A genuinely quiet day (a generated/rejected/stand_aside present) is NOT
-    treated as a failure."""
-    if BRIEF_BATCH and BRIEF_AUTHORING and due_assets:
+    treated as a failure. A SANDBOX backtest always uses the synchronous path: the Message-Batches
+    API is asynchronous (10-40 min latency), which is the wrong trade for a latency-sensitive,
+    operator-watched test run — the fast sync path keeps a backtest ~minutes, as it was before."""
+    sandbox = os.environ.get("ASSETFRAME_SANDBOX") == "1"
+    if BRIEF_BATCH and BRIEF_AUTHORING and due_assets and not sandbox:
         jobs = None
         try:
             jobs = generate_due_batched(due_assets, now, no_render, as_of, workers=workers)
