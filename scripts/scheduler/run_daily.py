@@ -116,15 +116,19 @@ CRITIC_MODEL = os.environ.get("ASSETFRAME_CRITIC_MODEL", "claude-haiku-4-5-20251
 CRITIC_MAX_TOKENS = _envint("ASSETFRAME_CRITIC_MAX_TOKENS", 8000)
 
 
-def _batch_deadline():
+def _batch_deadline(n_assets):
     """Absolute epoch deadline SHARED across the author + repair + critic batches, so total batch
     polling stays well under the systemd run timeout — leaving room for data prep, render, and a
-    full synchronous fallback if the batch is slow. Caps the configured budget at the run timeout
-    minus a 30-minute reserve, so a stuck/slow batch falls back to sync INSTEAD of the whole run
-    getting SIGTERM'd mid-poll (which would skip the fallback and lose the manifest)."""
+    full synchronous fallback if the batch is slow. The reserve SCALES with the universe size: a
+    timed-out batch falls back to authoring every asset serially (~8 min each on the rate-safe sync
+    path), so for N assets we keep N*480s + render headroom free. This guarantees a stuck/slow batch
+    falls back to sync and still finishes INSIDE the run timeout — even for a large universe —
+    instead of the whole run getting SIGTERM'd mid-poll (which would skip the fallback + lose the
+    manifest)."""
     run_to = _envint("ASSETFRAME_RUN_TIMEOUT", 5400)
     budget = _envint("ASSETFRAME_BATCH_TIMEOUT_S", 2400)
-    budget = max(300, min(budget, run_to - 1800))
+    reserve = max(1800, n_assets * 480 + 300)     # worst-case serial sync fallback + render
+    budget = max(300, min(budget, run_to - reserve))
     return time.time() + budget
 
 try:
@@ -696,8 +700,8 @@ def generate_due_batched(due_assets, now, no_render, as_of, workers=1):
         return [recs[a["ticker"]] for a in due_assets]
 
     # ONE shared wall-clock deadline for the author + repair + critic batches, so total batch
-    # polling can't overrun the run timeout and lose the run (see _batch_deadline).
-    batch_deadline = _batch_deadline()
+    # polling can't overrun the run timeout and lose the run (reserve scales with universe size).
+    batch_deadline = _batch_deadline(len(items))
 
     # Phase 2 — author ALL briefs in one batch (+ one repair batch for schema-failers). A submission
     # error raises out of here -> caller falls back to the synchronous writer.
