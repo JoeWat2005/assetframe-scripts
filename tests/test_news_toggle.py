@@ -19,13 +19,29 @@ except Exception:                       # brief_writer may need the Anthropic SD
 @unittest.skipUnless(_HAVE, "brief_writer import (Anthropic SDK)")
 class TestNewsToggle(unittest.TestCase):
     def test_news_on_full_budget_no_suffix(self):
+        # Default news-on budget is 6 (ASSETFRAME_BRIEF_WEB_MAX_USES); news-off must be < news-on.
+        os.environ.pop("ASSETFRAME_BRIEF_WEB_MAX_USES", None)
         uses, suffix = B._news_settings(True)
-        self.assertEqual(uses, 8)
+        self.assertEqual(uses, 6)
         self.assertEqual(suffix, "")
 
+    def test_news_on_budget_is_configurable(self):
+        os.environ["ASSETFRAME_BRIEF_WEB_MAX_USES"] = "4"
+        try:
+            self.assertEqual(B._news_settings(True)[0], 4)
+        finally:
+            os.environ.pop("ASSETFRAME_BRIEF_WEB_MAX_USES", None)
+        # a garbage value falls back to the default, never crashes
+        os.environ["ASSETFRAME_BRIEF_WEB_MAX_USES"] = "nope"
+        try:
+            self.assertEqual(B._news_settings(True)[0], 6)
+        finally:
+            os.environ.pop("ASSETFRAME_BRIEF_WEB_MAX_USES", None)
+
     def test_news_off_trims_budget_and_adds_directive(self):
+        os.environ.pop("ASSETFRAME_BRIEF_WEB_MAX_USES", None)
         uses, suffix = B._news_settings(False)
-        self.assertLess(uses, 8)
+        self.assertLess(uses, B._news_settings(True)[0])
         self.assertIn("technical-focus", suffix)
         self.assertIn("INSTRUMENT MODE", suffix)
 

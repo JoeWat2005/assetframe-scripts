@@ -11,6 +11,7 @@ Run:  python -m pytest tests/test_brief_batch.py -q
 import json
 import os
 import sys
+import time
 import types
 import unittest
 from pathlib import Path
@@ -97,7 +98,7 @@ def test_author_happy_path(monkeypatch):
     fake = _install(monkeypatch, responder)
 
     out = BB.author_briefs([_author_item("BTC"), _author_item("GOLD")],
-                           model="m", max_tokens=100, poll_interval=1, timeout=10)
+                           model="m", max_tokens=100, poll_interval=1, deadline=time.time() + 10)
     assert set(out) == {"BTC", "GOLD"}
     for tk in ("BTC", "GOLD"):
         assert out[tk]["brief"] is not None
@@ -119,7 +120,7 @@ def test_author_schema_miss_then_repair_succeeds(monkeypatch):
     fake = _install(monkeypatch, responder)
 
     out = BB.author_briefs([_author_item("BTC")], model="m", max_tokens=100,
-                           poll_interval=1, timeout=10)
+                           poll_interval=1, deadline=time.time() + 10)
     assert fake.round == 2                       # a repair batch was submitted
     assert out["BTC"]["brief"] is not None
     assert out["BTC"]["error"] is None
@@ -136,7 +137,7 @@ def test_author_schema_miss_persists(monkeypatch):
     _install(monkeypatch, responder)
 
     out = BB.author_briefs([_author_item("BTC")], model="m", max_tokens=100,
-                           poll_interval=1, timeout=10)
+                           poll_interval=1, deadline=time.time() + 10)
     assert out["BTC"]["brief"] is None
     assert out["BTC"]["error"]                    # carries the validation errors
 
@@ -148,7 +149,7 @@ def test_author_per_request_error(monkeypatch):
     _install(monkeypatch, responder)
 
     out = BB.author_briefs([_author_item("BTC")], model="m", max_tokens=100,
-                           poll_interval=1, timeout=10)
+                           poll_interval=1, deadline=time.time() + 10)
     assert out["BTC"]["brief"] is None
     assert "overloaded" in out["BTC"]["error"]
 
@@ -156,7 +157,7 @@ def test_author_per_request_error(monkeypatch):
 def test_author_uses_web_search_and_cache(monkeypatch):
     fake = _install(monkeypatch, lambda reqs, rnd:
                     [_result(r["custom_id"], text=json.dumps(VALID_BRIEF)) for r in reqs])
-    BB.author_briefs([_author_item("BTC")], model="m", max_tokens=100, poll_interval=1, timeout=10)
+    BB.author_briefs([_author_item("BTC")], model="m", max_tokens=100, poll_interval=1, deadline=time.time() + 10)
     params = fake.created[0][0]["params"]
     assert params["tools"][0]["name"] == "web_search"
     assert params["system"][0]["cache_control"] == {"type": "ephemeral"}
@@ -167,7 +168,7 @@ def test_custom_id_sanitised_and_mapped(monkeypatch):
     fake = _install(monkeypatch, lambda reqs, rnd:
                     [_result(r["custom_id"], text=json.dumps(VALID_BRIEF)) for r in reqs])
     out = BB.author_briefs([_author_item("XAU/USD")], model="m", max_tokens=100,
-                           poll_interval=1, timeout=10)
+                           poll_interval=1, deadline=time.time() + 10)
     assert out["XAU/USD"]["brief"] is not None
     cid = fake.created[0][0]["custom_id"]
     assert "/" not in cid and __import__("re").match(r"^[A-Za-z0-9_-]{1,64}$", cid)
@@ -180,7 +181,7 @@ def test_submission_error_propagates(monkeypatch):
     monkeypatch.setattr(BB.bw, "_require_sdk", lambda: object())
     monkeypatch.setattr(BB.bw, "_client", lambda _sdk: client)
     try:
-        BB.author_briefs([_author_item("BTC")], model="m", max_tokens=100, poll_interval=1, timeout=10)
+        BB.author_briefs([_author_item("BTC")], model="m", max_tokens=100, poll_interval=1, deadline=time.time() + 10)
         assert False, "expected RuntimeError to propagate"
     except RuntimeError as ex:
         assert "boom" in str(ex)
@@ -191,8 +192,9 @@ def test_timeout_raises_and_cancels(monkeypatch):
                     [_result(r["custom_id"], text=json.dumps(VALID_BRIEF)) for r in reqs],
                     ended=False)
     try:
+        # deadline already in the past -> first retrieve (in_progress) trips the budget immediately
         BB.author_briefs([_author_item("BTC")], model="m", max_tokens=100,
-                         poll_interval=1, timeout=0)
+                         poll_interval=1, deadline=time.time() - 1)
         assert False, "expected BatchTimeout"
     except BB.BatchTimeout:
         pass
@@ -210,7 +212,7 @@ def test_review_valid_verdict(monkeypatch):
     _install(monkeypatch, lambda reqs, rnd:
              [_result(r["custom_id"], text=json.dumps(verdict)) for r in reqs])
     out = BB.review_briefs([_critic_item("BTC")], model="m", max_tokens=100,
-                           poll_interval=1, timeout=10)
+                           poll_interval=1, deadline=time.time() + 10)
     assert out["BTC"]["decision"] == "approve"
     assert out["BTC"]["_telemetry"]["batch"] is True
 
@@ -220,7 +222,7 @@ def test_review_approve_with_blockers_downgrades(monkeypatch):
     _install(monkeypatch, lambda reqs, rnd:
              [_result(r["custom_id"], text=json.dumps(verdict)) for r in reqs])
     out = BB.review_briefs([_critic_item("BTC")], model="m", max_tokens=100,
-                           poll_interval=1, timeout=10)
+                           poll_interval=1, deadline=time.time() + 10)
     assert out["BTC"]["decision"] == "revise"
 
 
@@ -228,7 +230,7 @@ def test_review_malformed_is_none(monkeypatch):
     _install(monkeypatch, lambda reqs, rnd:
              [_result(r["custom_id"], text=json.dumps({"decision": "maybe"})) for r in reqs])
     out = BB.review_briefs([_critic_item("BTC")], model="m", max_tokens=100,
-                           poll_interval=1, timeout=10)
+                           poll_interval=1, deadline=time.time() + 10)
     assert out["BTC"] is None
 
 
@@ -236,7 +238,7 @@ def test_review_errored_is_none(monkeypatch):
     _install(monkeypatch, lambda reqs, rnd:
              [_result(r["custom_id"], rtype="expired") for r in reqs])
     out = BB.review_briefs([_critic_item("BTC")], model="m", max_tokens=100,
-                           poll_interval=1, timeout=10)
+                           poll_interval=1, deadline=time.time() + 10)
     assert out["BTC"] is None
 
 

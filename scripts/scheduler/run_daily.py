@@ -115,6 +115,18 @@ CRITIC_MODEL = os.environ.get("ASSETFRAME_CRITIC_MODEL", "claude-haiku-4-5-20251
 # 8000 (not 3000): a rich verdict's 'issues' list truncated mid-JSON at 3000 -> needs_brief.
 CRITIC_MAX_TOKENS = _envint("ASSETFRAME_CRITIC_MAX_TOKENS", 8000)
 
+
+def _batch_deadline():
+    """Absolute epoch deadline SHARED across the author + repair + critic batches, so total batch
+    polling stays well under the systemd run timeout — leaving room for data prep, render, and a
+    full synchronous fallback if the batch is slow. Caps the configured budget at the run timeout
+    minus a 30-minute reserve, so a stuck/slow batch falls back to sync INSTEAD of the whole run
+    getting SIGTERM'd mid-poll (which would skip the fallback and lose the manifest)."""
+    run_to = _envint("ASSETFRAME_RUN_TIMEOUT", 5400)
+    budget = _envint("ASSETFRAME_BATCH_TIMEOUT_S", 2400)
+    budget = max(300, min(budget, run_to - 1800))
+    return time.time() + budget
+
 try:
     from zoneinfo import ZoneInfo
     LONDON = ZoneInfo("Europe/London")
@@ -683,12 +695,16 @@ def generate_due_batched(due_assets, now, no_render, as_of, workers=1):
     if not items:
         return [recs[a["ticker"]] for a in due_assets]
 
+    # ONE shared wall-clock deadline for the author + repair + critic batches, so total batch
+    # polling can't overrun the run timeout and lose the run (see _batch_deadline).
+    batch_deadline = _batch_deadline()
+
     # Phase 2 — author ALL briefs in one batch (+ one repair batch for schema-failers). A submission
     # error raises out of here -> caller falls back to the synchronous writer.
     author = brief_batch.author_briefs(
         [{k: it[k] for k in ("ticker", "analysis", "memory_pack", "research", "social", "include_news")}
          for it in items],
-        model=BRIEF_MODEL, max_tokens=BRIEF_MAX_TOKENS)
+        model=BRIEF_MODEL, max_tokens=BRIEF_MAX_TOKENS, deadline=batch_deadline)
 
     review_items = []
     for it in items:
@@ -724,7 +740,7 @@ def generate_due_batched(due_assets, now, no_render, as_of, workers=1):
             review = brief_batch.review_briefs(
                 [{"ticker": it["ticker"], "brief": it["_brief"], "analysis": it["analysis"],
                   "research": it["research"]} for it in review_items],
-                model=CRITIC_MODEL, max_tokens=CRITIC_MAX_TOKENS)
+                model=CRITIC_MODEL, max_tokens=CRITIC_MAX_TOKENS, deadline=batch_deadline)
         except Exception as ex:
             print(f"  critic batch failed ({type(ex).__name__}: {ex}); "
                   f"authored briefs degrade to needs_brief")

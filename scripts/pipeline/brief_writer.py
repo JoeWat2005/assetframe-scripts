@@ -525,7 +525,15 @@ def _news_settings(include_news):
     """Per-asset news toggle -> (web_search max_uses, system-prompt suffix). News-on keeps the full
     research budget; news-off trims it and adds a technical-focus directive (no broken TD /news call:
     TD news is a business-tier feature, so WebSearch remains the news source)."""
-    return (8, "") if include_news else (2, NEWS_OFF_DIRECTIVE)
+    # News-on research budget is tunable (ASSETFRAME_BRIEF_WEB_MAX_USES, default 6). Web-search
+    # results are fed back as INPUT tokens, so this is the main per-brief cost dial: 6 keeps ample
+    # breadth (price + news + macro + a few specifics) while trimming ~25% off the 8-search input.
+    # Lower it (e.g. 4) to cut cost further, raise it for deeper research. Sonnet quality is unchanged.
+    try:
+        web_on = max(1, int(os.environ.get("ASSETFRAME_BRIEF_WEB_MAX_USES", "6")))
+    except (TypeError, ValueError):
+        web_on = 6
+    return (web_on, "") if include_news else (2, NEWS_OFF_DIRECTIVE)
 
 
 def author_brief(ticker, analysis, memory_pack, research, social, *, model,

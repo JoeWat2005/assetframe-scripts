@@ -98,6 +98,7 @@ RUNTIME_DEFAULTS = {
     "ASSETFRAME_BRIEF_BATCH": "0",         # 1 = author/critique via Message Batches (no rate limit,
                                            # 50% cheaper, scales to N assets). Sync path is the fallback.
     "ASSETFRAME_BRIEF_CONCURRENCY": "1",   # briefs authored at once (1 = safe on Anthropic Tier 1)
+    "ASSETFRAME_BRIEF_WEB_MAX_USES": "6",  # web searches per news-on brief (input-cost dial; was 8)
     "ASSETFRAME_RETENTION_DAYS": "14",
     "ASSETFRAME_RUN_TIMEOUT": "5400",
     "TWELVEDATA_RATE_PER_MIN": "8",
@@ -121,11 +122,10 @@ def load_runtime_config(path=DEFAULT_ENGINE_CONFIG):
     return cfg
 
 
-def apply_runtime_env(path=DEFAULT_ENGINE_CONFIG):
-    """Seed os.environ from config/engine.json WITHOUT overriding existing values (env wins). Call
-    once at the top of each entrypoint; spawned subprocesses then inherit the resolved settings."""
-    for k, v in load_runtime_config(path).items():
-        os.environ.setdefault(k, str(v))
+# NOTE: the canonical apply_runtime_env() lives further down (near RUNTIME_CONFIG). It seeds only
+# the allow-listed keys PRESENT in engine.json (env wins) and is what every entrypoint calls. An
+# earlier duplicate definition here was dead code (shadowed at import) and a refactor trap, so it
+# was removed. load_runtime_config() above is still used (tests + diagnostics).
 
 
 class ConfigError(ValueError):

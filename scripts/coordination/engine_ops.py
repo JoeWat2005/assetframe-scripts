@@ -583,12 +583,18 @@ def run_and_record(conn, trigger, scope, request_id=None, sandbox=False):
             # publish chain entirely and tag the run so it is distinguishable in engine_runs.
             if sandbox:
                 results = {**(results or {}), "sandbox": True, "publish": "skipped (sandbox)"}
-            elif status == "done":
+            elif status == "done" and (results or {}).get("generated"):
                 pub_ok, pub_err, pub_log = _publish_chain(conn, request_id)
                 log_excerpt = _tail((log_excerpt or "") + "\n\n" + pub_log)
                 results = {**(results or {}), "publish": "ok" if pub_ok else "failed"}
                 if not pub_ok:
                     status, errors = "failed", pub_err
+            elif status == "done":
+                # Nothing new was generated (e.g. every asset needs_brief on a keyless/empty day).
+                # Skip the publish chain — there is nothing to export/upload, and running sync-db over
+                # empty content would otherwise record the run 'failed' on its anti-wipe guard. This is
+                # a clean no-op, not a failure.
+                results = {**(results or {}), "publish": "skipped (nothing generated)"}
     except _FileLock.Locked:
         status, errors = "failed", "another run is already in progress (lock held)"
         log_excerpt = errors
@@ -894,6 +900,7 @@ _SETTABLE_CONFIG_KEYS = {
     "ASSETFRAME_AUTHOR_BRIEFS", "ADVISOR_DATA_PROVIDER", "ASSETFRAME_RUN_TIMEOUT",
     "ASSETFRAME_BRIEF_MODEL", "ASSETFRAME_RETENTION_DAYS",
     "ASSETFRAME_BRIEF_BATCH", "ASSETFRAME_CRITIC_MODEL", "ASSETFRAME_BRIEF_CONCURRENCY",
+    "ASSETFRAME_BRIEF_WEB_MAX_USES",
 }
 # Per-key value validators — reject a value that would brick the box via an allow-listed key. In
 # particular ASSETFRAME_RUN_TIMEOUT is int()-parsed at import; a non-integer would crash-loop the
@@ -908,6 +915,8 @@ _CONFIG_VALUE_VALIDATORS = {
     # Batch authoring toggle (1 = Message Batches path) + concurrent-brief cap on the sync path.
     "ASSETFRAME_BRIEF_BATCH": lambda v: v in ("0", "1"),
     "ASSETFRAME_BRIEF_CONCURRENCY": lambda v: v.isdigit() and 1 <= int(v) <= 16,
+    # Web searches per news-on brief (input-cost dial). Bounded so a typo can't run away.
+    "ASSETFRAME_BRIEF_WEB_MAX_USES": lambda v: v.isdigit() and 1 <= int(v) <= 15,
 }
 # tail_logs may only read these systemd units (prevents arbitrary -u injection).
 _KNOWN_POLLER_UNITS = {"assetframe-poller.service", "assetframe-poller-dev.service"}
