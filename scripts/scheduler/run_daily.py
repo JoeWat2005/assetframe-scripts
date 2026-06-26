@@ -127,7 +127,12 @@ def _batch_deadline(n_assets):
     manifest)."""
     run_to = _envint("ASSETFRAME_RUN_TIMEOUT", 5400)
     budget = _envint("ASSETFRAME_BATCH_TIMEOUT_S", 2400)
-    reserve = max(1800, n_assets * 480 + 300)     # worst-case serial sync fallback + render
+    # Reserve for the worst case: the batch times out and EVERY asset re-authors serially on the sync
+    # path. Production briefs are news-ON (web search), which run ~10 min each (vs the sandbox's
+    # news-OFF ~4 min), so reserve 600s/asset + render headroom. At the 5400s run timeout this keeps
+    # 4-5 assets fitting in BOTH the batch budget AND a full sync fallback (4 assets -> 40min batch /
+    # 50min fallback; 5 assets -> 30min batch / 60min fallback).
+    reserve = max(1800, n_assets * 600 + 600)
     budget = max(300, min(budget, run_to - reserve))
     return time.time() + budget
 
