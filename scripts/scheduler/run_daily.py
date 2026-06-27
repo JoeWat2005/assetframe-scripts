@@ -281,6 +281,11 @@ def score_step(now, tickers=None):
         if not ok:
             rec["error"] = (err or out)[-200:]
             errors.append(rec)
+        elif summary.get("skipped_duplicate"):
+            # already in the append-only ledger — a no-op re-score, NOT a new graded row. Count it as
+            # skipped so the publish gate (which fires on score.scored>0) doesn't re-sync every tick.
+            rec["reason"] = "already scored (idempotent)"
+            skipped.append(rec)
         else:
             scored.append(rec)
     # refresh ledger-derived memory (cheap; best-effort). SANDBOX: NEVER rebuild the live
@@ -323,16 +328,21 @@ def _refresh_candles_for_scoring(now, assets):
         tk = rid.rsplit("-", 1)[-1].upper() if rid else ""
         if tk in by_tk:
             need.add(tk)
+    done = []
     for tk in sorted(need):
-        a = by_tk[tk]
-        cmd = ["-m", "scripts.pipeline.intraday", a["provider_symbols"]["yahoo"], "--name", tk,
-               "--hrange", "10d", "--roll-utc", str(a.get("roll_utc", 0)),
-               "--session-profile", a["session_profile"]]
-        tds = (a.get("provider_symbols") or {}).get("twelvedata")
-        if tds:
-            cmd += ["--td-symbol", tds]
-        _run(cmd, timeout=120)
-    return sorted(need)
+        try:                                  # per-asset isolation: a malformed asset must not abort
+            a = by_tk[tk]                     # the whole score step (matches score_step's guard)
+            cmd = ["-m", "scripts.pipeline.intraday", a["provider_symbols"]["yahoo"], "--name", tk,
+                   "--hrange", "10d", "--roll-utc", str(a.get("roll_utc", 0)),
+                   "--session-profile", a["session_profile"]]
+            tds = (a.get("provider_symbols") or {}).get("twelvedata")
+            if tds:
+                cmd += ["--td-symbol", tds]
+            _run(cmd, timeout=120)
+            done.append(tk)
+        except Exception:
+            continue
+    return done
 
 
 # --------------------------------------------------------------- brief authoring

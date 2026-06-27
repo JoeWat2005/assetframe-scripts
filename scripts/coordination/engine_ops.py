@@ -981,7 +981,10 @@ def reap_stale_runs(conn, max_age_s=None):
     to sweep — while a 30-min in-flight batch is left alone. Also clears a now-stale current_run_id.
     Best-effort; a missing table is a no-op."""
     if max_age_s is None:
-        max_age_s = RUN_TIMEOUT + 600
+        # RUN_TIMEOUT bounds GENERATION; a healthy run then publishes (export+R2+sync, ~3x900s). Give
+        # 1h of grace so the full generate+publish lifetime is always inside the threshold and a slow
+        # (but alive) run is never swept — only a genuinely orphaned one is.
+        max_age_s = RUN_TIMEOUT + 3600
     try:
         conn.execute(
             "UPDATE engine_runs SET status = 'failed', "
@@ -1322,18 +1325,19 @@ def _cmd_run_scoring(conn, args):
         with _FileLock(LOCK_PATH, blocking=False):
             p = subprocess.run([sys.executable, "-m", RUN_DAILY, "--mode", "score_only"],
                                cwd=str(ROOT), capture_output=True, text=True, timeout=900)
+            out = ((p.stdout or "") + (p.stderr or "")).strip()
+            if p.returncode != 0:
+                return False, f"scoring run exited {p.returncode}", _tail(out, 2000), False
+            # score_only only writes the LOCAL ledger CSV; push the freshly-scored rows to Neon
+            # scored_results (the public track record). Run the publish chain INSIDE the run lock —
+            # exactly like run_and_record — so a separate-process daily run can't grab the freed lock
+            # and publish concurrently against the shared content/ dir (a half-written-export race).
+            pub_ok, pub_err, pub_log = _publish_chain(conn, None)
     except _FileLock.Locked:
         return False, "another run is in progress — retry run_scoring shortly", None, False
-    out = ((p.stdout or "") + (p.stderr or "")).strip()
-    if p.returncode == 0:
-        # score_only only writes the LOCAL ledger CSV; push the freshly-scored rows to Neon
-        # scored_results (the public track record) — otherwise the manual "run scoring" control
-        # grades into the CSV and the scores never reach the site.
-        pub_ok, pub_err, pub_log = _publish_chain(conn, None)
-        msg = ("scoring run complete (score_only) + synced" if pub_ok
-               else f"scored locally, but Neon sync failed: {pub_err}")
-        return True, msg, _tail((out + "\n\n" + (pub_log or "")).strip(), 2000), False
-    return False, f"scoring run exited {p.returncode}", _tail(out, 2000), False
+    msg = ("scoring run complete (score_only) + synced" if pub_ok
+           else f"scored locally, but Neon sync failed: {pub_err}")
+    return True, msg, _tail((out + "\n\n" + (pub_log or "")).strip(), 2000), False
 
 
 def _r2_client():
