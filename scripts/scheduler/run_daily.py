@@ -251,43 +251,82 @@ def select_assets(o):
 
 
 # --------------------------------------------------------------- score step
+def _preserve_pending(pending_dir, rid, p):
+    """Copy an UN-scored prediction into predictions/pending/<report_id>.json so the next generation's
+    overwrite of the per-ticker file can't lose it. score_step rescans pending/ EVERY run and grades
+    it once its window closes (or retries a transient scoring failure), then deletes it — the "check
+    it again next run until it scores" guarantee. report_ids are filename-safe (alnum + '-'); best-
+    effort, never raises."""
+    if not rid:
+        return
+    try:
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        (pending_dir / f"{rid}.json").write_text(json.dumps(p, indent=1) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def score_step(now, tickers=None):
-    """Score every in-scope prediction file whose window has closed (the scorer's dedup
-    guard makes this safe to re-run), then refresh calibration + research memory.
-    `tickers` (selected-asset tickers) scopes which files are eligible, so a scoped run
-    cannot pull unrelated/stale predictions into the ledger; None = all in scope."""
+    """Score every in-scope prediction whose window has closed (the scorer's dedup guard makes this
+    safe to re-run), then refresh calibration + research memory. Scans the CURRENT per-ticker files
+    AND predictions/pending/: a prediction NOT graded on a prior run (window still open, or a
+    transient scoring error) was PRESERVED to pending/ before its per-ticker file was overwritten, so
+    it is retried here every run UNTIL it grades, then removed — nothing is dropped just because it
+    wasn't scoreable the first time. `tickers` scopes which files are eligible; None = all in scope."""
     scored, skipped, errors = [], [], []
-    for pf in sorted(PRED_DIR.glob("*_predictions.json")):
+    pending_dir = PRED_DIR / "pending"
+    files = list(PRED_DIR.glob("*_predictions.json")) + list(pending_dir.glob("*.json"))
+    seen_rid = set()
+    for pf in sorted(files, key=lambda x: x.name):
+        is_pending = pf.parent.name == "pending"
         try:
             p = json.loads(pf.read_text(encoding="utf-8-sig"))
             wend = datetime.strptime(p["window_end_utc"][:16], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
         except Exception as ex:
             errors.append({"file": pf.name, "error": str(ex)[:120]}); continue
         rid = p.get("report_id", "")
+        if rid and rid in seen_rid:           # same prediction present as both current + pending copy
+            if is_pending:
+                _safe_unlink(pf)              # drop the redundant pending copy (handled via the other)
+            continue
+        if rid:
+            seen_rid.add(rid)
         tk = rid.rsplit("-", 1)[-1].upper() if rid else ""
         if tickers is not None and tk not in tickers:
             skipped.append({"file": pf.name, "reason": "out of scope"}); continue
         if wend >= now:
+            if not is_pending:               # still open -> keep a copy so this run's generation can't lose it
+                _preserve_pending(pending_dir, rid, p)
             skipped.append({"file": pf.name, "reason": "window still open"}); continue
-        ok, out, err = _run(["-m", "scripts.pipeline.score_report", str(pf.relative_to(ROOT))])
+        try:
+            _arg = str(pf.relative_to(ROOT))
+        except ValueError:
+            _arg = str(pf)
+        ok, out, err = _run(["-m", "scripts.pipeline.score_report", _arg])
         try:
             summary = json.loads(out[out.index("{"):]) if "{" in out else {}
         except Exception:
             summary = {}
-        rec = {"file": pf.name, "report_id": p.get("report_id"),
+        rec = {"file": pf.name, "report_id": rid,
                "skipped_duplicate": summary.get("skipped_duplicate"),
                "hit_rate_pct": summary.get("hit_rate_pct"),
                "unresolved_manual": summary.get("unresolved_manual"), "ok": ok}
         if not ok:
             rec["error"] = (err or out)[-200:]
             errors.append(rec)
+            if not is_pending:               # transient failure -> preserve for a retry next run
+                _preserve_pending(pending_dir, rid, p)
         elif summary.get("skipped_duplicate"):
             # already in the append-only ledger — a no-op re-score, NOT a new graded row. Count it as
             # skipped so the publish gate (which fires on score.scored>0) doesn't re-sync every tick.
             rec["reason"] = "already scored (idempotent)"
             skipped.append(rec)
+            if is_pending:
+                _safe_unlink(pf)             # graded on an earlier run -> drop the pending copy
         else:
             scored.append(rec)
+            if is_pending:
+                _safe_unlink(pf)             # graded now -> done, drop the pending copy
     # refresh ledger-derived memory (cheap; best-effort). SANDBOX: NEVER rebuild the live
     # calibration_map / research_memory / ledger_db from a sandbox ledger — a backtest grades
     # into ledger/sim and must not bleed into the production memory the live confidence engine
@@ -316,7 +355,7 @@ def _refresh_candles_for_scoring(now, assets):
     tickers refreshed."""
     by_tk = {a["ticker"]: a for a in assets}
     need = set()
-    for pf in PRED_DIR.glob("*_predictions.json"):
+    for pf in list(PRED_DIR.glob("*_predictions.json")) + list((PRED_DIR / "pending").glob("*.json")):
         try:
             p = json.loads(pf.read_text(encoding="utf-8-sig"))
             wend = datetime.strptime(p["window_end_utc"][:16], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
