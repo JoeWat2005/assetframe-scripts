@@ -425,6 +425,19 @@ def get_cadence_window(profile_key, cadence, now=None, holiday_dates=None,
     # already get a ~1-day window from get_session.
     fw = "next_liquid_session" if ptype in ("fx_24_5", "futures_23h") else None
     out = get_window(profile_key, forecast_window=fw, **kw)
+    # Crypto is 24/7 with no session close, so get_session hands back a rolling now+24h window — which
+    # closes ~24h after generation (AFTER the next morning run), so the prediction can never be scored
+    # the next day (and the per-ticker file is overwritten first). Re-target the DAILY crypto window to
+    # the next fixed 21:00 UTC close (aligned with the FX/commodity daily close) so every daily asset
+    # owns a distinct window that closes BEFORE the next run and grades cleanly the following morning.
+    if ptype == "crypto_24_7" and cadence == "daily":
+        _now = now or datetime.now(UTC)
+        _close = _now.replace(hour=21, minute=0, second=0, microsecond=0)
+        if _close <= _now + timedelta(minutes=min_remaining_min):
+            _close = _close + timedelta(days=1)
+        out["window_start_utc"] = _fmt(_now)
+        out["window_end_utc"] = _fmt(_close)
+        out["window_label"] = "to next 21:00 UTC daily close"
     out["scored_cadence"] = "daily"
     return out
 

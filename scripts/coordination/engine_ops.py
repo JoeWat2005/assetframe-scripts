@@ -583,18 +583,22 @@ def run_and_record(conn, trigger, scope, request_id=None, sandbox=False):
             # publish chain entirely and tag the run so it is distinguishable in engine_runs.
             if sandbox:
                 results = {**(results or {}), "sandbox": True, "publish": "skipped (sandbox)"}
-            elif status == "done" and (results or {}).get("generated"):
+            elif status == "done" and ((results or {}).get("generated")
+                                       or ((results or {}).get("score") or {}).get("scored")):
+                # Publish when the run GENERATED a new edition OR SCORED a closed window. Scoring
+                # mutates the ledger (a scored_results row) WITHOUT authoring an edition, and the public
+                # track record reads scored_results from Neon — so a score-only / quiet day (markets
+                # shut, only closed windows graded) must still run export + sync-db, or the scores are
+                # stranded in the local CSV forever (the bug that kept the track record empty).
                 pub_ok, pub_err, pub_log = _publish_chain(conn, request_id)
                 log_excerpt = _tail((log_excerpt or "") + "\n\n" + pub_log)
                 results = {**(results or {}), "publish": "ok" if pub_ok else "failed"}
                 if not pub_ok:
                     status, errors = "failed", pub_err
             elif status == "done":
-                # Nothing new was generated (e.g. every asset needs_brief on a keyless/empty day).
-                # Skip the publish chain — there is nothing to export/upload, and running sync-db over
-                # empty content would otherwise record the run 'failed' on its anti-wipe guard. This is
-                # a clean no-op, not a failure.
-                results = {**(results or {}), "publish": "skipped (nothing generated)"}
+                # Nothing generated AND nothing scored — a true no-op. Skip the publish chain (sync-db
+                # over empty content would otherwise trip its anti-wipe guard). Not a failure.
+                results = {**(results or {}), "publish": "skipped (nothing generated or scored)"}
     except _FileLock.Locked:
         status, errors = "failed", "another run is already in progress (lock held)"
         log_excerpt = errors
@@ -962,25 +966,38 @@ def reap_stale_commands(conn):
         pass
 
 
-def reap_stale_runs(conn):
-    """Called once on poller startup: mark any engine_runs left 'running' by a PREVIOUS process as
-    'failed'. A run's outcome-write happens IN the poller process (run_and_record / run_backtest_batch),
-    so if the poller is SIGKILLed mid-run (systemctl restart's 120s TimeoutStopSec elapsing while a
-    long BATCH run is in flight, an OOM, or a host reboot) the row is frozen at 'running'/finished_at
-    NULL forever — nothing else ever reconciles it (the symptom: backtests stuck 'running' a day on).
-    The poller is single-threaded and takes the .run.lock per run, so at startup NO run can still be
-    alive: any 'running' row is provably orphaned, so a blanket sweep is safe (same logic as
-    reap_stale_commands). Also clears a stale engine_state.current_run_id. Best-effort; a missing
-    table is a no-op."""
+def reap_stale_runs(conn, max_age_s=None):
+    """Reap ORPHANED engine_runs — mark any row left 'running' LONGER than max_age_s as 'failed'. A
+    run's outcome-write happens IN its own process (run_and_record / run_backtest_batch), so if that
+    process is SIGKILLed mid-run — a deploy restart (systemctl's TimeoutStopSec), an OOM, the systemd
+    ceiling, a host reboot — the row freezes at 'running'/finished_at=NULL forever (the symptom: a run
+    stuck 'running' a day later). Called at poller startup AND every Neon pass, so an orphan self-heals
+    within one tick with NO manual restart.
+
+    AGE-BASED (default RUN_TIMEOUT + 10-min grace) is the safety: the daily run is a SEPARATE oneshot
+    process that ALSO takes the run lock, so a blanket 'WHERE status=running' sweep would wrongly fail
+    a legitimately in-flight oneshot. The engine's own RUN_TIMEOUT records every healthy run's outcome
+    by RUN_TIMEOUT seconds, so anything STILL 'running' past RUN_TIMEOUT+grace is provably dead and safe
+    to sweep — while a 30-min in-flight batch is left alone. Also clears a now-stale current_run_id.
+    Best-effort; a missing table is a no-op."""
+    if max_age_s is None:
+        max_age_s = RUN_TIMEOUT + 600
     try:
         conn.execute(
             "UPDATE engine_runs SET status = 'failed', "
-            "  errors = coalesce(errors, 'interrupted (poller restarted mid-run)'), "
-            "  finished_at = now() WHERE status = 'running'")
+            "  errors = coalesce(errors, 'orphaned (process killed mid-run before recording outcome)'), "
+            "  finished_at = now() "
+            "WHERE status = 'running' AND started_at < now() - make_interval(secs => %s)",
+            (int(max_age_s),))
     except Exception:
         pass
+    # Clear engine_state.current_run_id only if it no longer points at a row that is STILL 'running'
+    # (so a live run's banner is never cleared out from under it).
     try:
-        set_current_run(conn, None)
+        conn.execute(
+            "UPDATE engine_state SET current_run_id = NULL "
+            "WHERE current_run_id IS NOT NULL AND current_run_id NOT IN "
+            "  (SELECT id FROM engine_runs WHERE status = 'running')")
     except Exception:
         pass
 
@@ -1309,7 +1326,13 @@ def _cmd_run_scoring(conn, args):
         return False, "another run is in progress — retry run_scoring shortly", None, False
     out = ((p.stdout or "") + (p.stderr or "")).strip()
     if p.returncode == 0:
-        return True, "scoring run complete (score_only)", _tail(out, 2000), False
+        # score_only only writes the LOCAL ledger CSV; push the freshly-scored rows to Neon
+        # scored_results (the public track record) — otherwise the manual "run scoring" control
+        # grades into the CSV and the scores never reach the site.
+        pub_ok, pub_err, pub_log = _publish_chain(conn, None)
+        msg = ("scoring run complete (score_only) + synced" if pub_ok
+               else f"scored locally, but Neon sync failed: {pub_err}")
+        return True, msg, _tail((out + "\n\n" + (pub_log or "")).strip(), 2000), False
     return False, f"scoring run exited {p.returncode}", _tail(out, 2000), False
 
 

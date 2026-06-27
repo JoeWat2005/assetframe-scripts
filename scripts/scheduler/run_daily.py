@@ -299,6 +299,42 @@ def score_step(now, tickers=None):
     return {"scored": scored, "skipped": skipped, "errors": errors, "memory_refresh": refresh}
 
 
+def _refresh_candles_for_scoring(now, assets):
+    """Re-fetch the latest candles for any asset that has a pending CLOSED-window prediction, so the
+    hourly CSV covers the window close at score time. WITHOUT this the live score_step reads a CSV
+    left by a PRIOR generation that ends at ~gen time (hours before the 20:00/21:00 window close), so
+    score_report skips every window for "CSV stops short" — THE reason nothing ever scored. The fetch
+    has NO --as-of, so a weekend-closed market (e.g. AAPL on Saturday) still grades its Friday window
+    off its last-open data (the provider returns the last available session). Independent of due-ness;
+    scoped to assets that actually have a pending closed window so it never refetches the whole
+    universe. Best-effort: a failed fetch just leaves score_report to skip that one. Returns the
+    tickers refreshed."""
+    by_tk = {a["ticker"]: a for a in assets}
+    need = set()
+    for pf in PRED_DIR.glob("*_predictions.json"):
+        try:
+            p = json.loads(pf.read_text(encoding="utf-8-sig"))
+            wend = datetime.strptime(p["window_end_utc"][:16], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+        if wend >= now:                       # still open -> nothing to grade, no refresh needed
+            continue
+        rid = p.get("report_id", "")
+        tk = rid.rsplit("-", 1)[-1].upper() if rid else ""
+        if tk in by_tk:
+            need.add(tk)
+    for tk in sorted(need):
+        a = by_tk[tk]
+        cmd = ["-m", "scripts.pipeline.intraday", a["provider_symbols"]["yahoo"], "--name", tk,
+               "--hrange", "10d", "--roll-utc", str(a.get("roll_utc", 0)),
+               "--session-profile", a["session_profile"]]
+        tds = (a.get("provider_symbols") or {}).get("twelvedata")
+        if tds:
+            cmd += ["--td-symbol", tds]
+        _run(cmd, timeout=120)
+    return sorted(need)
+
+
 # --------------------------------------------------------------- brief authoring
 def author_brief_step(asset, brief_path):
     """Autonomously author + adversarially review the research brief.
@@ -958,6 +994,11 @@ def main():
     # pre-generate pass for a backtest — it would only see leftover sim predictions with trimmed data.
     if o["mode"] in ("score_only", "production") and not o["sandbox"]:
         print("scoring closed windows + refreshing memory...")
+        # FIRST bring candles current for any asset with a now-closed window (incl. weekend-closed
+        # markets), so score_report's coverage check passes instead of skipping for "CSV stops short".
+        _refreshed = _refresh_candles_for_scoring(now, assets)
+        if _refreshed:
+            print(f"  refreshed candles for scoring: {', '.join(_refreshed)}")
         manifest["score"] = score_step(now, {a["ticker"] for a in assets})
         s = manifest["score"]
         print(f"  scored={len(s['scored'])} skipped={len(s['skipped'])} errors={len(s['errors'])} "
