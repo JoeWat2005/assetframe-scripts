@@ -43,7 +43,7 @@ from psycopg.rows import dict_row
 from _paths import ROOT, SCRIPTS         # repo-root anchors (the scripts/__init__ shim is on sys.path)
 RUN_DAILY = "scripts.scheduler.run_daily"          # spawned as `python -m <module>` (cwd = ROOT)
 SYNC_BACKTEST = "scripts.analytics.sync_backtest"  # pushes ledger/sim -> Neon backtest_results
-LOCK_PATH = ROOT / ".run.lock"          # serialises run_daily across timer + poller
+from locking import _FileLock, LOCK_PATH   # run lock lives in locking.py now; re-exported here
 # The sandbox working trees a backtest writes to (cleared by clear_sandbox; never the live trees).
 SANDBOX_DIRS = ["ledger/sim", "data/predictions/sim", "reports/sim",
                 "data/briefs/sim", "data/research/sim", "data/social/sim"]
@@ -399,78 +399,6 @@ def summarize_manifest(manifest):
 
 
 # --------------------------------------------------------------------- locking
-class _FileLock:
-    """A best-effort cross-process exclusive lock at LOCK_PATH.
-
-    POSIX (the OCI VM): fcntl.flock — released automatically if the process dies.
-    Windows (dev/test): msvcrt.locking — good enough for local structural runs.
-    blocking=False raises Locked if the lock is already held (a concurrent run)."""
-
-    class Locked(Exception):
-        pass
-
-    def __init__(self, path=LOCK_PATH, blocking=False, timeout=0):
-        self.path = Path(path)
-        self.blocking = blocking
-        self.timeout = timeout
-        self._fh = None
-
-    def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self.path, "a+")
-        try:
-            import fcntl   # POSIX
-            flags = fcntl.LOCK_EX | (0 if self.blocking else fcntl.LOCK_NB)
-            if self.blocking and self.timeout:
-                deadline = time.time() + self.timeout
-                while True:
-                    try:
-                        fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        break
-                    except OSError:
-                        if time.time() >= deadline:
-                            raise self.Locked("run lock held (timeout)")
-                        time.sleep(0.5)
-            else:
-                try:
-                    fcntl.flock(self._fh, flags)
-                except OSError:
-                    raise self.Locked("another run holds the lock")
-        except ImportError:
-            import msvcrt   # Windows
-            try:
-                msvcrt.locking(self._fh.fileno(), msvcrt.LK_NBLCK, 1)
-            except OSError:
-                raise self.Locked("another run holds the lock")
-        try:
-            self._fh.seek(0)
-            self._fh.truncate()
-            self._fh.write(f"pid={os.getpid()} at={_utcnow().isoformat()}\n")
-            self._fh.flush()
-        except Exception:
-            pass
-        return self
-
-    def __exit__(self, *exc):
-        try:
-            try:
-                import fcntl
-                fcntl.flock(self._fh, fcntl.LOCK_UN)
-            except ImportError:
-                import msvcrt
-                try:
-                    self._fh.seek(0)
-                    msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
-                except OSError:
-                    pass
-        finally:
-            try:
-                self._fh.close()
-            except Exception:
-                pass
-        return False
-
-
 # ------------------------------------------------------------- run + record
 def _new_run_id(trigger, request_id):
     """Deterministic-ish run id: req-<reqid> for manual, daily-<UTC date> for schedule."""
