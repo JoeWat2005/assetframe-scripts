@@ -374,13 +374,15 @@ def test_futures_friday_within_cutoff_targets_next_session():
     assert s["window_end_utc"] == "2026-06-22 21:00"
 
 
-def test_futures_open_session_does_not_surface_daily_maintenance():
-    # DOCUMENTS CURRENT (pre-existing) behaviour: an OPEN futures session's window always ends
-    # on the Friday weekly close, and the daily-break block only fires when window-end lands
-    # Mon-Thu, so the nightly maintenance break is reported as "none" for the live session.
+def test_futures_open_session_surfaces_in_window_daily_maintenance():
+    # FIXED: an OPEN futures session now SCANS its multi-day window for the next nightly maintenance
+    # break (instead of only checking the window-end date, which is always the Fri weekly close). A
+    # Wednesday-open session surfaces the Wednesday-evening break.
+    _need_tz()
     s = S.get_session("cme_futures", now=_at("2026-06-17 12:00"))   # open Wednesday
     assert s["market_state"] == "open"
-    assert s["next_maintenance_break"] == "none before window end"
+    nb = s["next_maintenance_break"]
+    assert "daily maintenance" in nb and "2026-06-17" in nb and nb != "none before window end"
 
 
 def test_fx_spot_has_no_maintenance_break():

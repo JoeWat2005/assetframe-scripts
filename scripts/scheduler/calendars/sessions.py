@@ -250,17 +250,25 @@ def get_session(profile_key, now=None, min_remaining_min=90, friday_cutoff_min=2
         out["window_label"] = "remainder of current session"
 
     nb = "none before window end"
-    if p.get("daily_break") and end.weekday() in (0, 1, 2, 3):
-        if _TZ_OK and p.get("daily_break_local") and p.get("tz"):
-            b0 = _local_to_utc(end.date(), p["daily_break_local"][0], p["tz"])
-            brk = f"{p['daily_break_local'][0]}-{p['daily_break_local'][1]} CT"
-        else:
-            b0 = end.replace(hour=int(p["daily_break"][0][:2]), minute=int(p["daily_break"][0][3:5]))
-            brk = f"{p['daily_break'][0]}-{p['daily_break'][1]} UTC"
-        if start < b0 < end:
-            nb = f"{_fmt(b0)} UTC daily maintenance ({brk})"
-        else:
-            nb = f"next daily break {_fmt(b0)} UTC ({brk}, at/after window end)"
+    if p.get("daily_break"):
+        # SCAN [start, end) for the next daily maintenance break — don't key off end.date(): for an
+        # OPEN session end is the Friday weekly close (weekday 4), so a single end-date check misses
+        # the Mon-Thu nightly breaks the multi-day window actually crosses.
+        d = start.date()
+        while d <= end.date():
+            if d.weekday() in (0, 1, 2, 3):
+                if _TZ_OK and p.get("daily_break_local") and p.get("tz"):
+                    b0 = _local_to_utc(d, p["daily_break_local"][0], p["tz"])
+                    brk = f"{p['daily_break_local'][0]}-{p['daily_break_local'][1]} CT"
+                else:
+                    b0 = datetime(d.year, d.month, d.day, int(p["daily_break"][0][:2]),
+                                  int(p["daily_break"][0][3:5]), tzinfo=timezone.utc)
+                    brk = f"{p['daily_break'][0]}-{p['daily_break'][1]} UTC"
+                if b0 > start:                       # the next upcoming break from the window start
+                    nb = (f"{_fmt(b0)} UTC daily maintenance ({brk})" if b0 < end
+                          else f"next daily break {_fmt(b0)} UTC ({brk}, at/after window end)")
+                    break
+            d += timedelta(days=1)
     out.update({
         "market_open_utc": _fmt(wo - timedelta(days=7)) if not in_weekend and wo - timedelta(days=7) <= now else _fmt(wo),
         "market_close_utc": _fmt(wc),
