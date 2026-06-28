@@ -107,7 +107,8 @@ def _finish_command(conn, cmd_id, status, result, log, restart):
             (status, (result or None), (_tail(log, 4096) if log else None), cmd_id))
     except Exception:
         pass
-    return {"status": status, "result": result, "restart": bool(restart)}
+    return {"status": status, "result": result, "restart": bool(restart),
+            "log": (_tail(log, 4096) if log else None)}
 
 
 # ---- handlers: each returns (ok: bool, result: str, log: str|None, restart: bool) -------------
@@ -484,14 +485,23 @@ def _cmd_service_check(conn, args):
 
 def _cmd_clear_r2(conn, args):
     """Delete report objects from R2. args {date:'YYYY-MM-DD'} clears just that date's prefix; with
-    no date it clears the WHOLE bucket. Destructive — the web confirms first."""
+    NO date key it clears the WHOLE bucket. A present-but-malformed date is REJECTED (never silently
+    widened to a full-bucket wipe). Destructive — the web confirms first."""
     import re as _re
+    date = (args or {}).get("date")
+    if date is None:
+        prefix = ""                       # no date supplied -> whole bucket (the documented intent)
+    elif isinstance(date, str) and _re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        prefix = f"{date}/"
+    else:
+        # A malformed / extra-whitespace date must NOT fall through to "" — that would delete the
+        # ENTIRE bucket. Require an EXACT YYYY-MM-DD; omit `date` for a deliberate full-bucket clear.
+        return False, (f"date {date!r} must be exactly 'YYYY-MM-DD' — omit the date entirely to "
+                       "clear the whole bucket"), None, False
     try:
         client, bucket = _r2_client()
     except Exception as ex:
         return False, f"R2 not configured: {str(ex)[:160]}", None, False
-    date = (args or {}).get("date")
-    prefix = f"{date}/" if date and _re.match(r"^\d{4}-\d{2}-\d{2}$", str(date)) else ""
     deleted = 0
     try:
         token = None

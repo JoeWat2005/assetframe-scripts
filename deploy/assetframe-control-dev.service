@@ -13,7 +13,8 @@ ExecStart=/opt/assetframe-scripts-dev/.venv/bin/python -m scripts.coordination.c
 # The dev .env MUST set:  ASSETFRAME_CONTROL_PORT=8788
 #                         ASSETFRAME_CF_TEAM=wat044
 #                         ASSETFRAME_CONTROL_AUD=<dev Access app AUD>
-#   (optional 2nd factor) ASSETFRAME_CONTROL_TOKEN=<random secret, also the dev Vercel env var>
+#              (REQUIRED) ASSETFRAME_CONTROL_TOKEN=<random secret; POST /control write factor, also
+#                         the dev Vercel env var sent as Authorization: Bearer>
 
 Restart=always
 RestartSec=5

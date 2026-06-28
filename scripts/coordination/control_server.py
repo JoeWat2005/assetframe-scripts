@@ -121,11 +121,17 @@ def authorize(headers, cfg, verifier, *, require_bearer):
             verifier.verify(token)
         except Exception as ex:
             return False, f"invalid Access token: {str(ex)[:160]}"
-    if require_bearer and cfg.bearer:
-        auth = headers.get("Authorization") or headers.get("authorization") or ""
-        sent = auth[7:] if auth.startswith("Bearer ") else ""
-        if not (sent and hmac.compare_digest(sent, cfg.bearer)):
-            return False, "missing or wrong bearer token"
+    if require_bearer:
+        # The bearer is the only app-layer factor separating a destructive POST /control write from a
+        # read-only GET (one Access app gates both methods), so:
+        if cfg.bearer:                                          # configured -> always enforce it
+            auth = headers.get("Authorization") or headers.get("authorization") or ""
+            sent = auth[7:] if auth.startswith("Bearer ") else ""
+            if not (sent and hmac.compare_digest(sent, cfg.bearer)):
+                return False, "missing or wrong bearer token"
+        elif not cfg.insecure:                                 # secure but UNSET -> fail closed
+            return False, "server misconfigured: ASSETFRAME_CONTROL_TOKEN is unset (writes disabled)"
+        # else: insecure (local dev) AND no token -> full local bypass
     return True, "ok"
 
 
@@ -145,9 +151,12 @@ def _new_job(command, args):
         jid = f"job-{_JOB_SEQ[0]}"
         _JOBS[jid] = {"id": jid, "command": command, "args": args, "status": "running",
                       "result": None, "log": None, "created_at": _utcnow_iso(), "finished_at": None}
-        # bound the table — drop the oldest finished jobs
+        # bound the table — drop only the oldest FINISHED jobs (never evict a still-running one,
+        # else its outcome would be lost from /jobs while it is still executing)
         if len(_JOBS) > _MAX_JOBS:
-            for old in sorted(_JOBS, key=lambda k: _JOBS[k]["created_at"])[:len(_JOBS) - _MAX_JOBS]:
+            done = sorted((k for k in _JOBS if _JOBS[k]["status"] in ("done", "failed")),
+                          key=lambda k: _JOBS[k]["created_at"])
+            for old in done[:len(_JOBS) - _MAX_JOBS]:
                 _JOBS.pop(old, None)
     return jid
 
@@ -163,6 +172,7 @@ def _run_job(jid, command, args, runner=None):
             res = run_command(conn, {"command": command, "args": args})
         status = res.get("status", "failed")
         result = res.get("result")
+        log = res.get("log")
     except Exception as ex:
         result = f"control_server job error: {ex}"[:400]
     finally:
@@ -237,9 +247,29 @@ def read_snapshot(runs=8):
         return {"now": _utcnow_iso(), "online": False, "error": str(ex)[:200]}
 
 
+# One SHARED snapshot, refreshed at most every _SNAP_TTL seconds, so N concurrent /events streams +
+# /status hit Neon ~once per window instead of once per stream per 2s tick. Concurrent SSE streams are
+# capped (each is a worker thread) so an authorised client can't open unbounded live connections.
+_SNAP = {"data": None, "at": -1e9}
+_SNAP_LOCK = threading.Lock()
+_SNAP_TTL = 2.0
+_SSE_SLOTS = threading.BoundedSemaphore(8)
+
+
+def cached_snapshot():
+    now = time.monotonic()
+    with _SNAP_LOCK:
+        if _SNAP["data"] is not None and (now - _SNAP["at"]) < _SNAP_TTL:
+            return _SNAP["data"]
+        data = read_snapshot()
+        _SNAP["data"], _SNAP["at"] = data, time.monotonic()
+        return data
+
+
 # ------------------------------------------------------------------------------- HTTP
 class _Handler(BaseHTTPRequestHandler):
     server_version = "AssetFrameControl/1"
+    timeout = 30        # per-request socket deadline: bounds a slow-loris body + a stuck SSE reader
     cfg = None          # set by serve()
     verifier = None     # set by serve()
 
@@ -268,7 +298,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._auth(require_bearer=False):
             return
         if path == "/status":
-            return self._send(200, read_snapshot())
+            return self._send(200, cached_snapshot())
         if path == "/events":
             return self._sse()
         if path.startswith("/jobs/"):
@@ -291,7 +321,11 @@ class _Handler(BaseHTTPRequestHandler):
         return self._send(code, body)
 
     def _sse(self):
-        """Stream a status snapshot every ~2s until the client disconnects."""
+        """Stream the SHARED status snapshot every ~2s until the client disconnects. Concurrent
+        streams are capped (each is a worker thread); the per-handler socket timeout bounds a stuck
+        reader so a half-open client can't pin a thread forever."""
+        if not _SSE_SLOTS.acquire(blocking=False):
+            return self._send(503, {"error": "too many live streams open; retry shortly"})
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -299,22 +333,32 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "keep-alive")
             self.end_headers()
             while True:
-                payload = json.dumps(read_snapshot()).encode("utf-8")
+                payload = json.dumps(cached_snapshot()).encode("utf-8")
                 self.wfile.write(b"data: " + payload + b"\n\n")
                 self.wfile.flush()
                 time.sleep(2.0)
         except (BrokenPipeError, ConnectionError, OSError):
-            return   # client went away — end the thread
+            return   # client went away (or the socket timed out) — end the thread
+        finally:
+            _SSE_SLOTS.release()
 
 
 def serve(cfg=None):
     cfg = cfg or ControlConfig()
     if cfg.insecure:
-        _log("WARNING: ASSETFRAME_CONTROL_INSECURE=1 — Access JWT check DISABLED (dev only)")
-    elif not (cfg.team and cfg.aud):
-        _log("CONFIG ERROR: ASSETFRAME_CF_TEAM and ASSETFRAME_CONTROL_AUD must be set (or use "
-             "ASSETFRAME_CONTROL_INSECURE=1 for local dev)")
-        return 1
+        _log("WARNING: ASSETFRAME_CONTROL_INSECURE=1 — Access JWT + bearer checks DISABLED (dev only)")
+    else:
+        if not (cfg.team and cfg.aud):
+            _log("CONFIG ERROR: ASSETFRAME_CF_TEAM and ASSETFRAME_CONTROL_AUD must be set (or use "
+                 "ASSETFRAME_CONTROL_INSECURE=1 for local dev)")
+            return 1
+        if not cfg.bearer:
+            # Fail closed (see authorize): the bearer is the write factor for POST /control; without
+            # it a destructive write collapses to the same gate as a read. Refuse to start.
+            _log("CONFIG ERROR: ASSETFRAME_CONTROL_TOKEN must be set — it is the write factor for "
+                 "POST /control. Put it in .env (and the matching Vercel env var), or use "
+                 "ASSETFRAME_CONTROL_INSECURE=1 for local dev.")
+            return 1
     _Handler.cfg = cfg
     _Handler.verifier = AccessVerifier(cfg.team, cfg.aud)
     httpd = ThreadingHTTPServer(("127.0.0.1", cfg.port), _Handler)

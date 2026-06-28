@@ -16,8 +16,9 @@ ExecStart=/opt/assetframe-scripts/.venv/bin/python -m scripts.coordination.contr
 # The prod .env MUST set:  ASSETFRAME_CONTROL_PORT=8787
 #                          ASSETFRAME_CF_TEAM=wat044
 #                          ASSETFRAME_CONTROL_AUD=<prod Access app AUD>
-#   (optional 2nd factor)  ASSETFRAME_CONTROL_TOKEN=<random secret, also a Vercel env var>
-# Without CF_TEAM + CONTROL_AUD the server refuses to start (fail-closed), unless
+#               (REQUIRED)  ASSETFRAME_CONTROL_TOKEN=<random secret; the POST /control write factor —
+#                           ALSO a Vercel env var so the dashboard sends it as Authorization: Bearer>
+# Without CF_TEAM + CONTROL_AUD + CONTROL_TOKEN the server refuses to start (fail-closed), unless
 # ASSETFRAME_CONTROL_INSECURE=1 is set (LOCAL DEV ONLY — never on the box).
 
 Restart=always

@@ -114,6 +114,14 @@ class TestRunJob(unittest.TestCase):
         self.assertEqual(j["status"], "failed")
         self.assertIn("kaboom", j["result"])
 
+    def test_log_is_threaded_through(self):
+        # the command layer's `log` (e.g. tail_logs output) must reach the job, not be dropped
+        jid = CS.submit_command("tail_logs", {}, spawn=False)[1]["job_id"]
+        CS._run_job(jid, "tail_logs", {},
+                    runner=lambda conn, row: {"status": "done", "result": "captured", "log": "line1\nline2"})
+        _sc, j = CS.job_status(jid)
+        self.assertEqual(j["log"], "line1\nline2")
+
 
 class TestAuthorize(unittest.TestCase):
     def test_insecure_allows(self):
@@ -171,6 +179,52 @@ class TestSnapshot(unittest.TestCase):
         snap = CS.snapshot(FakeConn(state=st, runs=[]))
         self.assertFalse(snap["online"])
         self.assertTrue(snap["paused"])
+
+
+class TestBearerFailClosed(unittest.TestCase):
+    """Review fix: in secure mode the bearer is the write factor — an UNSET token must fail closed
+    (not silently drop POST /control to the same gate as a read)."""
+
+    class _V:
+        def verify(self, t):
+            return {}                    # JWT valid — isolate the bearer check
+
+    def test_secure_post_blocked_when_token_unconfigured(self):
+        cfg = _cfg(insecure=False, bearer="")
+        ok, reason = CS.authorize({"Cf-Access-Jwt-Assertion": "x"}, cfg, self._V(), require_bearer=True)
+        self.assertFalse(ok)
+        self.assertIn("ASSETFRAME_CONTROL_TOKEN", reason)
+
+    def test_secure_post_ok_with_token_and_bearer(self):
+        cfg = _cfg(insecure=False, bearer="s3cret")
+        ok, _ = CS.authorize({"Cf-Access-Jwt-Assertion": "x", "Authorization": "Bearer s3cret"},
+                             cfg, self._V(), require_bearer=True)
+        self.assertTrue(ok)
+
+    def test_secure_read_only_needs_no_token(self):
+        cfg = _cfg(insecure=False, bearer="")          # reads are gated by the JWT alone
+        ok, _ = CS.authorize({"Cf-Access-Jwt-Assertion": "x"}, cfg, self._V(), require_bearer=False)
+        self.assertTrue(ok)
+
+
+class TestCachedSnapshot(unittest.TestCase):
+    def test_caches_within_ttl(self):
+        calls = [0]
+        orig = CS.read_snapshot
+
+        def counting(runs=8):
+            calls[0] += 1
+            return {"n": calls[0]}
+
+        CS.read_snapshot = counting
+        CS._SNAP["data"], CS._SNAP["at"] = None, -1e9
+        try:
+            a, b = CS.cached_snapshot(), CS.cached_snapshot()
+            self.assertEqual(a, b)
+            self.assertEqual(calls[0], 1)              # 2nd call served from cache (one Neon hit)
+        finally:
+            CS.read_snapshot = orig
+            CS._SNAP["data"], CS._SNAP["at"] = None, -1e9
 
 
 if __name__ == "__main__":

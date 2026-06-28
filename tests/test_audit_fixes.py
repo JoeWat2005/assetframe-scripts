@@ -166,6 +166,17 @@ def test_downgrade_unbacked_reject():
     assert RD._downgrade_unbacked_reject({"decision": "approve", "summary": "ok"}) == ("approve", {"decision": "approve", "summary": "ok"})
 
 
+# --------------------------------------------- clear_r2 must not widen a malformed date to whole-bucket
+def test_clear_r2_rejects_malformed_date():
+    # A present-but-malformed date used to fall through to prefix="" = DELETE THE WHOLE BUCKET. It must
+    # now error instead (validated BEFORE any R2 call, so no boto3/creds needed here). Only an ABSENT
+    # date legitimately means whole-bucket.
+    import commands as CMD
+    for bad in ("2026-6-28", "2026/06/28", "2026-06-28 ", "garbage", ["2026-06-28"], ""):
+        ok, msg, _log, _restart = CMD._cmd_clear_r2(None, {"date": bad})
+        assert ok is False and "YYYY-MM-DD" in msg, f"{bad!r} should be rejected, got {ok!r}/{msg!r}"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
