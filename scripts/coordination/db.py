@@ -1,6 +1,6 @@
 """db.py — engine DB + run-state foundation (split out of engine_ops). Conn-first SQL primitives +
 config/env seed + RUN_TIMEOUT. Imports NO coordination sibling."""
-import os, sys
+import json, os, sys
 from datetime import datetime, timezone
 
 import psycopg
@@ -256,6 +256,82 @@ class EngineDB:
             if cancel_short_circuit:
                 return None   # table not migrated yet — nothing to do (no log spam)
             raise
+
+
+class RunRecorder:
+    """Folds the engine_runs row-lifecycle ENVELOPE that runner.run_and_record and
+    runner.run_backtest_batch both wrap their work in:
+
+      * start()  — INSERT a 'running' engine_runs row (ON CONFLICT (id) resets
+                   results/errors/log_excerpt/finished_at + status back to 'running' so a
+                   re-run of the same id starts clean) and claim engine_state.current_run_id.
+      * finish() — UPDATE that row's terminal columns (status/results/errors/log_excerpt/
+                   finished_at) and clear current_run_id.
+
+    This is the row the admin console reads for live status and that db.reap_stale_runs
+    depends on, so the INSERT/UPDATE SQL is kept BYTE-IDENTICAL to the two originals. The run
+    lock (_FileLock), the publish chain (run_and_record) and the multi-day loop
+    (run_backtest_batch) deliberately STAY in the callers — RunRecorder owns ONLY the
+    bookkeeping, not the work.
+
+    The two callers differ in exactly one thing: how the trigger appears in the INSERT.
+    run_and_record BINDS it as a parameter (`VALUES (%s, %s, %s, ...)` + `trigger =
+    excluded.trigger`); run_backtest_batch EMBEDS it as a SQL literal (`VALUES (%s,
+    'backtest', %s, ...)` + `trigger = 'backtest'`). `trigger_literal=True` selects the
+    literal form (preserving the 'backtest' literal already in the engine_runs INSERT)."""
+
+    def __init__(self, conn, run_id, trigger, scope, *, trigger_literal=False):
+        self.conn = conn
+        self.run_id = run_id
+        self.trigger = trigger
+        self.scope = scope
+        self.trigger_literal = trigger_literal
+        self.start_error = None   # exception text from a failed start(), for the caller to surface
+
+    def start(self):
+        """INSERT the 'running' row + claim current_run_id. Returns True on success; on ANY
+        failure returns False (NEVER raises) with the exception text on self.start_error, so the
+        caller can bail its own way (run_and_record marks the request failed; run_backtest_batch
+        just returns the run id)."""
+        try:
+            if self.trigger_literal:
+                self.conn.execute(
+                    "INSERT INTO engine_runs (id, trigger, scope, status, started_at) "
+                    f"VALUES (%s, '{self.trigger}', %s, 'running', now()) "
+                    f"ON CONFLICT (id) DO UPDATE SET trigger = '{self.trigger}', scope = excluded.scope, "
+                    "  status = 'running', started_at = now(), results = NULL, errors = NULL, "
+                    "  log_excerpt = NULL, finished_at = NULL",
+                    (self.run_id, json.dumps(self.scope)))
+            else:
+                self.conn.execute(
+                    "INSERT INTO engine_runs (id, trigger, scope, status, started_at) "
+                    "VALUES (%s, %s, %s, 'running', now()) "
+                    "ON CONFLICT (id) DO UPDATE SET trigger = excluded.trigger, "
+                    "  scope = excluded.scope, status = 'running', started_at = now(), "
+                    "  results = NULL, errors = NULL, log_excerpt = NULL, finished_at = NULL",
+                    (self.run_id, self.trigger, json.dumps(self.scope)))
+            set_current_run(self.conn, self.run_id)
+            return True
+        except Exception as ex:
+            self.start_error = str(ex)
+            return False
+
+    def finish(self, status, results, errors, log):
+        """Record the outcome: UPDATE status/results/errors/log_excerpt/finished_at and clear
+        current_run_id. Best-effort — both writes are guarded so finish() never raises (the
+        callers wrapped these in try/except: pass)."""
+        try:
+            self.conn.execute(
+                "UPDATE engine_runs SET status = %s, results = %s, errors = %s, "
+                "  log_excerpt = %s, finished_at = now() WHERE id = %s",
+                (status, json.dumps(results) if results else None, errors,
+                 log or None, self.run_id))
+        except Exception:
+            pass
+        try:
+            set_current_run(self.conn, None)
+        except Exception:
+            pass
 
 
 class OpsContext:

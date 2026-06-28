@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 from _paths import ROOT, SCRIPTS
 from locking import _FileLock, LOCK_PATH
-from db import set_current_run, is_cancel_requested, _utcnow, RUN_TIMEOUT, _empty_dir
+from db import is_cancel_requested, _utcnow, RUN_TIMEOUT, _empty_dir, RunRecorder
 from manifest import scope_to_run_args, _read_run_manifest, summarize_manifest, _new_run_id, _tail
 
 RUN_DAILY = "scripts.scheduler.run_daily"          # spawned as `python -m <module>` (cwd = ROOT)
@@ -87,18 +87,11 @@ def run_and_record(conn, trigger, scope, request_id=None, sandbox=False):
         args = args + ["--sandbox"]
 
     # 1. create the run row + claim current_run_id (best-effort; never fatal).
-    try:
-        conn.execute(
-            "INSERT INTO engine_runs (id, trigger, scope, status, started_at) "
-            "VALUES (%s, %s, %s, 'running', now()) "
-            "ON CONFLICT (id) DO UPDATE SET trigger = excluded.trigger, "
-            "  scope = excluded.scope, status = 'running', started_at = now(), "
-            "  results = NULL, errors = NULL, log_excerpt = NULL, finished_at = NULL",
-            (run_id, trigger, json.dumps(scope_json)))
-        set_current_run(conn, run_id)
-    except Exception as ex:
+    rec = RunRecorder(conn, run_id, trigger, scope_json)
+    if not rec.start():
         # If we can't even create the row, still try to mark the request failed.
-        _finish_request(conn, request_id, "failed", run_id, f"could not start run: {ex}"[:500])
+        _finish_request(conn, request_id, "failed", run_id,
+                        f"could not start run: {rec.start_error}"[:500])
         return run_id
 
     status = "failed"
@@ -139,19 +132,8 @@ def run_and_record(conn, trigger, scope, request_id=None, sandbox=False):
         log_excerpt = errors
 
     # 5. record the outcome.
-    try:
-        conn.execute(
-            "UPDATE engine_runs SET status = %s, results = %s, errors = %s, "
-            "  log_excerpt = %s, finished_at = now() WHERE id = %s",
-            (status, json.dumps(results) if results else None, errors,
-             log_excerpt or None, run_id))
-    except Exception:
-        pass
+    rec.finish(status, results, errors, log_excerpt)
     _finish_request(conn, request_id, _request_status(status), run_id, errors)
-    try:
-        set_current_run(conn, None)
-    except Exception:
-        pass
     return run_id
 
 
@@ -211,16 +193,8 @@ def run_backtest_batch(conn, assets, as_of, days=1):
         except ValueError:
             bad = f"run_backtest as_of {as_of!r} must be 'YYYY-MM-DD HH:MM'"
 
-    try:
-        conn.execute(
-            "INSERT INTO engine_runs (id, trigger, scope, status, started_at) "
-            "VALUES (%s, 'backtest', %s, 'running', now()) "
-            "ON CONFLICT (id) DO UPDATE SET trigger = 'backtest', scope = excluded.scope, "
-            "  status = 'running', started_at = now(), results = NULL, errors = NULL, "
-            "  log_excerpt = NULL, finished_at = NULL",
-            (run_id, json.dumps(scope)))
-        set_current_run(conn, run_id)
-    except Exception:
+    rec = RunRecorder(conn, run_id, "backtest", scope, trigger_literal=True)
+    if not rec.start():
         return run_id   # can't even create the run row -> nothing else we can record to
 
     status = "failed"
@@ -269,17 +243,7 @@ def run_backtest_batch(conn, assets, as_of, days=1):
         "days": days, "assets": assets, "total_scored": total_scored,
         "day_runs": day_results,
     }
-    try:
-        conn.execute(
-            "UPDATE engine_runs SET status = %s, results = %s, errors = %s, "
-            "  log_excerpt = %s, finished_at = now() WHERE id = %s",
-            (status, json.dumps(results), errors, log_excerpt or None, run_id))
-    except Exception:
-        pass
-    try:
-        set_current_run(conn, None)
-    except Exception:
-        pass
+    rec.finish(status, results, errors, log_excerpt)
     return run_id
 
 
