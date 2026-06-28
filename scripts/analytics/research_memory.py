@@ -29,37 +29,10 @@ DEFAULT_OUT = Path("ledger/research_memory.json")
 MIN_N = 4   # same n>=4 guard ledger_context uses before naming a pattern
 
 
-def parse_dt(s):
-    try:
-        return datetime.strptime(s.strip()[:16], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
-    except (ValueError, AttributeError):
-        return None
-
-
-def _rate(hits, misses):
-    tot = hits + misses
-    return round(100 * hits / tot, 1) if tot else None
-
-
-def load_rows(ledger_path, as_of):
-    """All scored rows with window_end strictly before as_of (no look-ahead)."""
-    rows = []
-    if not Path(ledger_path).exists():
-        return rows
-    with open(ledger_path, newline="", encoding="utf-8") as f:
-        for r in csv.DictReader(f):
-            wend = parse_dt(r.get("window_end_utc", ""))
-            if wend is None or wend >= as_of:
-                continue
-            try:
-                r["_hits"] = int(r.get("hits") or 0)
-                r["_misses"] = int(r.get("misses") or 0)
-            except ValueError:
-                continue
-            r["_wend"] = wend
-            rows.append(r)
-    rows.sort(key=lambda x: x["_wend"])
-    return rows
+# parse_dt / _rate / load_rows live in the shared _ledger_io (deduped with ledger_context);
+# re-exported under their original names. load_rows also tags _ticker — ignored here (this module
+# aggregates ACROSS instruments), harmless extra key.
+from _ledger_io import parse_dt, rate as _rate, load_rows  # noqa: E402,F401
 
 
 def _breakdown(rows, key):

@@ -29,42 +29,9 @@ DEFAULT_LEDGER = Path("ledger/outcome_ledger.csv")
 RECENT_K = 8
 
 
-def parse_dt(s):
-    try:
-        return datetime.strptime(s.strip()[:16], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
-    except (ValueError, AttributeError):
-        return None
-
-
-def _ticker_of(report_id):
-    return (report_id or "").rsplit("-", 1)[-1].strip().upper()
-
-
-def _rate(hits, misses):
-    tot = hits + misses
-    return round(100 * hits / tot, 1) if tot else None
-
-
-def load_rows(ledger_path, as_of):
-    """All scored rows with window_end strictly before as_of (no look-ahead)."""
-    rows = []
-    if not Path(ledger_path).exists():
-        return rows
-    with open(ledger_path, newline="", encoding="utf-8") as f:
-        for r in csv.DictReader(f):
-            wend = parse_dt(r.get("window_end_utc", ""))
-            if wend is None or wend >= as_of:
-                continue
-            try:
-                r["_hits"] = int(r.get("hits") or 0)
-                r["_misses"] = int(r.get("misses") or 0)
-            except ValueError:
-                continue
-            r["_ticker"] = _ticker_of(r.get("report_id"))
-            r["_wend"] = wend
-            rows.append(r)
-    rows.sort(key=lambda x: x["_wend"])
-    return rows
+# parse_dt / _ticker_of / _rate / load_rows live in the shared _ledger_io (deduped with
+# research_memory); re-exported under their original names so the rest of this module is unchanged.
+from _ledger_io import parse_dt, ticker_of as _ticker_of, rate as _rate, load_rows  # noqa: E402,F401
 
 
 def _agg(rows):

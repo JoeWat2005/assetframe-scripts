@@ -281,7 +281,7 @@ def get_asset(asset_id, path=DEFAULT_CONFIG):
 # JSON keys ARE the env var names the engine already reads, so applying the file just fills os.environ
 # for any key not already set — env always wins, so systemd EnvironmentFile / ad-hoc overrides keep
 # precedence and no read site changes. The admin "set config" command writes this same file.
-RUNTIME_CONFIG = Path("config/engine.json")
+RUNTIME_CONFIG = DEFAULT_ENGINE_CONFIG          # same file; one source of truth (was a duplicate literal)
 # Allow-list of runtime knobs apply_runtime_env() seeds from engine.json. DERIVED from
 # RUNTIME_DEFAULTS so every default is automatically settable from the file — a hardcoded subset
 # silently dropped newer knobs (ASSETFRAME_BRIEF_BATCH / _CRITIC_MODEL / _BRIEF_CONCURRENCY were set
