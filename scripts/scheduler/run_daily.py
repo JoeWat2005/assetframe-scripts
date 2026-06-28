@@ -95,11 +95,9 @@ except (TypeError, ValueError):
 _BRIEF_SEM = threading.Semaphore(_BRIEF_CONCURRENCY)
 
 
-def _envint(name, default):
-    try:
-        return int(os.environ.get(name, str(default)))
-    except (TypeError, ValueError):
-        return default
+# subprocess + env/JSON utilities live in _subproc.py now; re-exported into this module so
+# bare _run/_run_rc/_parse_last_json/_envint calls (and the tests that monkeypatch RD._run) work.
+from _subproc import _envint, _run, _run_rc, _parse_last_json  # noqa: E402
 
 
 # Brief authoring via the Anthropic Message Batches API (scale path). When ON, ALL due assets'
@@ -144,52 +142,6 @@ try:
     LONDON = ZoneInfo("Europe/London")
 except Exception:                       # pragma: no cover
     LONDON = None
-
-
-def _run(cmd, timeout=180):
-    """Run a child script; return (ok, stdout, stderr). Never raises."""
-    ok, _rc, out, err = _run_rc(cmd, timeout=timeout)
-    return ok, out, err
-
-
-def _run_rc(cmd, timeout=180):
-    """Like _run but also returns the exit CODE — needed by the critic, which signals
-    its verdict via the exit code (0 approve/revise, 2 reject/stand_aside) as well as
-    JSON. Returns (ok, returncode, stdout, stderr). Never raises."""
-    try:
-        p = subprocess.run([sys.executable] + cmd, cwd=str(ROOT), capture_output=True,
-                           text=True, timeout=timeout)
-        return p.returncode == 0, p.returncode, p.stdout, p.stderr
-    except subprocess.TimeoutExpired:
-        return False, -1, "", f"timeout after {timeout}s"
-    except Exception as ex:
-        return False, -1, "", str(ex)[:200]
-
-
-def _parse_last_json(text):
-    """Best-effort: parse the last TOP-LEVEL JSON object printed on a child's stdout.
-
-    Must NOT use rfind('{'): the critic prints its verdict pretty-printed (indent=1), so the last
-    '{' is a NESTED object (e.g. "_telemetry") — slicing from there yields a sub-object that parses
-    fine but lacks "decision", silently dropping a good verdict to needs_brief. Instead scan for each
-    top-level '{', raw_decode it (which consumes the whole object incl. its nested braces), and
-    return the last one that decoded — robust to both pretty-printed and single-line output."""
-    if not text:
-        return {}
-    dec = json.JSONDecoder()
-    out, idx, n = {}, 0, len(text)
-    while True:
-        b = text.find("{", idx)
-        if b == -1:
-            break
-        try:
-            obj, end = dec.raw_decode(text, b)
-            if isinstance(obj, dict):
-                out = obj
-            idx = max(end, b + 1)
-        except json.JSONDecodeError:
-            idx = b + 1
-    return out
 
 
 def parse_args(argv):
