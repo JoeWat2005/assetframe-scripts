@@ -1,0 +1,29 @@
+[Unit]
+Description=AssetFrame box control server — DEV (HTTP API behind cloudflared + Cloudflare Access)
+Documentation=https://github.com/JoeWat2005/assetframe-scripts
+After=network-online.target cloudflared-engine-dev.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The DEV control server runs from the SEPARATE dev checkout (its own .env -> dev Neon branch).
+WorkingDirectory=/opt/assetframe-scripts-dev
+EnvironmentFile=/opt/assetframe-scripts-dev/.env
+ExecStart=/opt/assetframe-scripts-dev/.venv/bin/python -m scripts.coordination.control_server
+# The dev .env MUST set:  ASSETFRAME_CONTROL_PORT=8788
+#                         ASSETFRAME_CF_TEAM=wat044
+#                         ASSETFRAME_CONTROL_AUD=<dev Access app AUD>
+#   (optional 2nd factor) ASSETFRAME_CONTROL_TOKEN=<random secret, also the dev Vercel env var>
+
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Environment=PYTHONUNBUFFERED=1
+
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target

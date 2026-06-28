@@ -24,3 +24,9 @@ anthropic>=0.40
 # sync chain halts before anything reaches R2 or Neon. (Local free-only builds never call
 # publish, but installing it is harmless.)
 boto3>=1.34
+
+# JWT validation for the box control server (scripts/coordination/control_server.py): verifies the
+# Cloudflare-Access `Cf-Access-Jwt-Assertion` JWT (RS256) against the team JWKS before any /control
+# command runs. The [crypto] extra pulls in `cryptography` for RS256. Only needed on the box running
+# the control service; the rest of the engine never imports it.
+PyJWT[crypto]>=2.8

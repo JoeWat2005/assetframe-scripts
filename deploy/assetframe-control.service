@@ -1,0 +1,35 @@
+[Unit]
+Description=AssetFrame box control server (HTTP API behind cloudflared + Cloudflare Access) — PROD
+Documentation=https://github.com/JoeWat2005/assetframe-scripts
+# Outbound only — binds 127.0.0.1; the public hostname engine.assetframe.co.uk reaches it ONLY
+# through the cloudflared tunnel, gated by Cloudflare Access. Start after the tunnel.
+After=network-online.target cloudflared-engine.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --- EDIT these paths to match the VM (same checkout as the prod poller) ---
+WorkingDirectory=/opt/assetframe-scripts
+EnvironmentFile=/opt/assetframe-scripts/.env
+ExecStart=/opt/assetframe-scripts/.venv/bin/python -m scripts.coordination.control_server
+# --------------------------------------------------------------------------
+# The prod .env MUST set:  ASSETFRAME_CONTROL_PORT=8787
+#                          ASSETFRAME_CF_TEAM=wat044
+#                          ASSETFRAME_CONTROL_AUD=<prod Access app AUD>
+#   (optional 2nd factor)  ASSETFRAME_CONTROL_TOKEN=<random secret, also a Vercel env var>
+# Without CF_TEAM + CONTROL_AUD the server refuses to start (fail-closed), unless
+# ASSETFRAME_CONTROL_INSECURE=1 is set (LOCAL DEV ONLY — never on the box).
+
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Environment=PYTHONUNBUFFERED=1
+
+# Light hardening: it only needs outbound HTTPS (Neon + the team JWKS) and to read the repo tree.
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target
