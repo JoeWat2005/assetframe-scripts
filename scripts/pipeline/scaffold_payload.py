@@ -179,10 +179,13 @@ def build_levels(analysis, last_price):
     add("s2", piv.get("S2"), "invalidation", "S2 support pivot")
     add("tail_lo", bands.get("outer_lo"), "tail", "Lower tail - outer ATR band")
 
-    # de-dupe by value (keep the first/most-specific id), then sort high->low
+    # de-dupe by value (keep the first/most-specific id), then sort high->low. Round at the RENDER
+    # precision (_dp), not a fixed 4dp: a sub-1 FX/crypto pair renders at 5dp, so two levels that
+    # differ only in the 5th decimal display distinctly and must NOT collapse to one (which would
+    # silently drop a level + a setup).
     seen, levels = set(), []
     for lv in cand:
-        key = round(lv["value"], 4)
+        key = round(lv["value"], _dp(lv["value"]))
         if key in seen:
             continue
         seen.add(key)
@@ -200,7 +203,9 @@ def _fmt_rr(ref, inval, t1, t2):
         return abs(t - ref) / risk if t is not None else None
     m1, m2 = mult(t1), mult(t2)
     def part(m):
-        return f"{m:.1f}x" if (m is not None and m >= 1.0) else "below 1.0x"
+        if m is None:
+            return "n/a"                       # no such target (e.g. a long setup with no R1) - not "<1.0x"
+        return f"{m:.1f}x" if m >= 1.0 else "below 1.0x"
     return f"T1 {part(m1)}; T2 {part(m2)}", m1, m2
 
 
@@ -285,8 +290,16 @@ def build_ladder(levels, setups):
 
 
 def build_predictions_spec(by_id, brief, direction):
-    """P1..P6 mapped onto canonical levels; returns (predictions, ledger_levels)."""
-    bull = direction == "bullish"
+    """P1..P6 mapped onto canonical levels; returns (predictions, ledger_levels).
+
+    The DIRECTIONAL predictions (P1 settle-vs-PP, P3 R1-touch) are emitted only for a genuine
+    bull/bear view. A neutral/mixed brief gets ONLY the symmetric range/floor/ceiling predictions
+    (P2/P4/P5) — registering a directional bet the analyst never made would both misframe the
+    report and corrupt the track record / calibration. (Previously `bull = direction=="bullish"`
+    silently made neutral AND mixed bearish.)"""
+    d = (direction or "").strip().lower()
+    bull = d == "bullish"
+    directional = d in ("bullish", "bearish")    # neutral/mixed -> no P1/P3
     preds, lv = [], []
 
     def v(_id):
@@ -296,7 +309,7 @@ def build_predictions_spec(by_id, brief, direction):
     r1, r2, anchor = v("r1"), v("r2"), v("anchor")
     floor = v("swing_lo") or v("inner_lo") or v("s1")
 
-    if pp is not None:
+    if pp is not None and directional:
         preds.append({"id": "P1", "type": "close_above", "level": pp, "expect": bool(bull),
                       "text": f"Session settles {'above' if bull else 'below'} PP {pp}"})
         lv.append(pp)
@@ -304,7 +317,7 @@ def build_predictions_spec(by_id, brief, direction):
         preds.append({"id": "P2", "type": "range_inside", "lo": tlo, "hi": thi, "expect": True,
                       "text": f"Stays inside the outer bands {tlo} - {thi}"})
         lv += [tlo, thi]
-    if r1 is not None:
+    if r1 is not None and directional:
         preds.append({"id": "P3", "type": "touches", "level": r1, "expect": bool(bull),
                       "text": f"R1 {r1} is {'' if bull else 'not '}touched"})
         lv.append(r1)
@@ -407,6 +420,10 @@ def assemble(name, analysis, brief, session, last_price, last_ts, levels, by_id,
         "latest_bar_timestamp_report_tz": to_display(last_ts),
         "latest_bar_complete": True,
         "data_provider": (analysis.get("provider") or {}).get("hourly", "yahoo"),
+        "data_provider_daily": (analysis.get("provider") or {}).get("daily"),
+        "data_license_mode": (analysis.get("provider") or {}).get("license_mode", "personal"),
+        "data_license_degraded": bool((analysis.get("provider") or {}).get("license_degraded")),
+        "data_provider_note": (analysis.get("provider") or {}).get("note"),
         "window_freshness_warning": window_freshness_warning,
         "cross_check_provider": brief.get("cross_check", "single-source (no independent cross-check this run)"),
         "price_type": brief.get("price_type", "session close"),
@@ -663,10 +680,19 @@ def _ledger_html(brief, ledger_levels):
 
 
 def _source_audit_html(brief, analysis, dq):
-    prov = (analysis.get("provider") or {}).get("hourly", "engine")
+    prov = analysis.get("provider") or {}
+    hp = prov.get("hourly") or "engine"
+    dp = prov.get("daily")
+    src = hp if (not dp or dp == hp) else f"{hp} (hourly) + {dp} (daily)"   # G6: don't hide a split source
     gaps = brief.get("source_gaps") or (brief.get("news_context") or {}).get("source_gaps", [])
-    h = (f"<ul><li><b>Primary data provider:</b> project intraday engine ({prov}).</li>"
+    h = (f"<ul><li><b>Primary data provider:</b> project intraday engine ({src}).</li>"
          f"<li><b>Cross-check:</b> {brief.get('cross_check','single-source this run')}.</li>")
+    if prov.get("license_mode") == "commercial":
+        if prov.get("license_degraded"):
+            h += ("<li><b>&#9888; Data licensing:</b> this edition fell back to a "
+                  "non-commercially-licensed source — not for redistribution.</li>")
+        else:
+            h += "<li><b>Data licensing:</b> commercially-licensed feed.</li>"
     if gaps:
         h += "<li><b>Gaps:</b> " + "; ".join(gaps) + ".</li>"
     h += f"<li><b>Overall data quality: {dq}/10.</b></li></ul>"

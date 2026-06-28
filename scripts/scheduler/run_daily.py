@@ -67,6 +67,10 @@ import brief_batch   # Anthropic Message-Batches author/critique orchestrator (s
 
 MODES = ("dry_run", "score_only", "generate_only", "production")
 PRED_DIR = ROOT / "data" / "predictions"
+# A pending prediction this old has a closed window the candle feed can no longer cover (data aged
+# out) or a permanently-unscoreable id (ticker dropped from config) — abandon it instead of
+# re-fetching + retrying it on every run forever. Matches the default reports retention horizon.
+MAX_PENDING_AGE_DAYS = 14
 BRIEF_DIR = ROOT / "data" / "briefs"
 MEMPACK_DIR = ROOT / "data" / "memory_packs"
 RESEARCH_DIR = ROOT / "data" / "research"
@@ -298,6 +302,13 @@ def score_step(now, tickers=None):
             if not is_pending:               # still open -> keep a copy so this run's generation can't lose it
                 _preserve_pending(pending_dir, rid, p)
             skipped.append({"file": pf.name, "reason": "window still open"}); continue
+        if is_pending and wend < now - timedelta(days=MAX_PENDING_AGE_DAYS):
+            # closed long ago and still unscored -> the feed can't cover it / the id is dead. Stop
+            # re-fetching + retrying it forever (out-of-scope ticker, data aged out, permanent fail).
+            _safe_unlink(pf)
+            skipped.append({"file": pf.name, "report_id": rid,
+                            "reason": f"abandoned: unscored >{MAX_PENDING_AGE_DAYS}d after window close"})
+            continue
         try:
             _arg = str(pf.relative_to(ROOT))
         except ValueError:
@@ -354,7 +365,7 @@ def _refresh_candles_for_scoring(now, assets):
     universe. Best-effort: a failed fetch just leaves score_report to skip that one. Returns the
     tickers refreshed."""
     by_tk = {a["ticker"]: a for a in assets}
-    need = set()
+    need = {}                                 # ticker -> oldest still-gradeable CLOSED window_start
     for pf in list(PRED_DIR.glob("*_predictions.json")) + list((PRED_DIR / "pending").glob("*.json")):
         try:
             p = json.loads(pf.read_text(encoding="utf-8-sig"))
@@ -363,16 +374,29 @@ def _refresh_candles_for_scoring(now, assets):
             continue
         if wend >= now:                       # still open -> nothing to grade, no refresh needed
             continue
+        if wend < now - timedelta(days=MAX_PENDING_AGE_DAYS):
+            continue                          # too old to grade (score_step abandons it) -> don't refetch
         rid = p.get("report_id", "")
         tk = rid.rsplit("-", 1)[-1].upper() if rid else ""
-        if tk in by_tk:
-            need.add(tk)
+        if tk not in by_tk:
+            continue
+        try:
+            wstart = datetime.strptime(p["window_start_utc"][:16], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+        except Exception:
+            wstart = wend
+        if tk not in need or wstart < need[tk]:
+            need[tk] = wstart
     done = []
     for tk in sorted(need):
         try:                                  # per-asset isolation: a malformed asset must not abort
             a = by_tk[tk]                     # the whole score step (matches score_step's guard)
+            # Span the hourly fetch back past the OLDEST open window_start (+2d slack) so a weekly/
+            # monthly window's WHOLE span is covered, not just the last 10 days (else an early-window
+            # break is scored as "held"). Floored at 10d, capped at 45d (hourly history limit).
+            span_days = (now - need[tk]).days + 2
+            hrange = f"{max(10, min(span_days, 45))}d"
             cmd = ["-m", "scripts.pipeline.intraday", a["provider_symbols"]["yahoo"], "--name", tk,
-                   "--hrange", "10d", "--roll-utc", str(a.get("roll_utc", 0)),
+                   "--hrange", hrange, "--roll-utc", str(a.get("roll_utc", 0)),
                    "--session-profile", a["session_profile"]]
             tds = (a.get("provider_symbols") or {}).get("twelvedata")
             if tds:
@@ -466,6 +490,9 @@ def author_brief_step(asset, brief_path):
     if not decision:          # critic API/parse failure -> can't trust it; degrade
         res["status"] = "writer_unavailable"
         return res
+    if decision == "reject" and not _reject_is_backed(verdict):
+        decision = res["decision"] = "revise"   # over-cautious reject, no blocker cited -> publish
+        res["critic_summary"] = "[reject downgraded: no blocker cited] " + (res["critic_summary"] or "")
 
     # 3. No second 'repair' authoring pass. 'approve' AND 'revise' both mean the brief is PUBLISHABLE
     # (a 'revise' is minor edits) — so both GENERATE directly. The old repair pass DOUBLED the
@@ -484,6 +511,42 @@ def author_brief_step(asset, brief_path):
         res["status"] = "brief_rejected"
         _safe_unlink(brief_path)
     return res
+
+
+def _reject_is_backed(verdict):
+    """A 'reject' must cite a concrete blocker — `publish_blockers` non-empty, or a blocker-severity
+    issue. A reject with neither is over-cautious (common from the cheap Haiku critic) and would
+    silently lose an otherwise-publishable report; the rendered-report QA gate (mvp_report.run_qa)
+    is the hard backstop, so such a reject is downgraded to 'revise' (publish) at the call sites."""
+    if verdict.get("publish_blockers"):
+        return True
+    return any(isinstance(i, dict) and i.get("severity") == "blocker"
+               for i in (verdict.get("issues") or []))
+
+
+def _rel_to_root(p):
+    """Path relative to ROOT (subprocesses run with cwd=ROOT); absolute fallback if outside it."""
+    try:
+        return str(Path(p).relative_to(ROOT))
+    except ValueError:
+        return str(p)
+
+
+def _sync_critique_one(it):
+    """Run the synchronous critic on an ALREADY-AUTHORED batch brief (it['brief_path'] on disk).
+    Used to salvage a critic-BATCH failure without re-authoring (the briefs are already paid for).
+    Returns the verdict dict (or {} on failure)."""
+    tk = it["ticker"]
+    # NB: it['analysis'] is the PARSED analysis JSON, not a path — rebuild the on-disk path here
+    # (critic.py takes --analysis <path>, exactly as the sync _critique does).
+    analysis_p = ROOT / "data" / "analysis" / f"{tk}_analysis.json"
+    cmd = ["-m", "scripts.pipeline.critic", _rel_to_root(it["brief_path"]), "--asset", tk,
+           "--analysis", _rel_to_root(analysis_p)]
+    rp = RESEARCH_DIR / f"{tk}_research_pack.json"
+    if rp.exists():
+        cmd += ["--research", _rel_to_root(rp)]
+    _ok, _rc, out, _err = _run_rc(cmd, timeout=CRITIC_TIMEOUT)
+    return _parse_last_json(out) or {}
 
 
 def _issues_to_guidance(verdict):
@@ -837,8 +900,13 @@ def generate_due_batched(due_assets, now, no_render, as_of, workers=1):
                 model=CRITIC_MODEL, max_tokens=CRITIC_MAX_TOKENS, deadline=batch_deadline)
         except Exception as ex:
             print(f"  critic batch failed ({type(ex).__name__}: {ex}); "
-                  f"authored briefs degrade to needs_brief")
-            review = {it["ticker"]: None for it in review_items}
+                  f"re-critiquing the authored briefs synchronously (briefs kept, NOT re-authored)")
+            review = {}
+            for it in review_items:
+                try:
+                    review[it["ticker"]] = _sync_critique_one(it)
+                except Exception:
+                    review[it["ticker"]] = None
     else:
         review = {}
 
@@ -856,6 +924,10 @@ def generate_due_batched(due_assets, now, no_render, as_of, workers=1):
             _seal(tk)
             continue
         decision = verdict["decision"]
+        if decision == "reject" and not _reject_is_backed(verdict):
+            decision = "revise"        # over-cautious reject, no blocker cited -> publish (QA backstops)
+            verdict = {**verdict, "summary": "[reject downgraded: no blocker cited] "
+                       + (verdict.get("summary") or "")}
         rec["critic_decision"] = decision
         rec["critic_summary"] = verdict.get("summary", "") or ""
         if verdict.get("issues"):

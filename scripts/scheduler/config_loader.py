@@ -92,6 +92,9 @@ REQUIRED = ("id", "name", "instrument", "ticker", "provider_symbols", "asset_cla
 DEFAULT_ENGINE_CONFIG = Path("config/engine.json")
 RUNTIME_DEFAULTS = {
     "ADVISOR_DATA_PROVIDER": "yahoo",
+    "ASSETFRAME_DATA_LICENSE": "personal",  # personal | commercial. commercial -> only commercially
+                                            # licensed feeds back a published report; a free-tier
+                                            # fallback flags the edition license_degraded (one-knob flip).
     "ASSETFRAME_BRIEF_MODEL": "claude-sonnet-4-6",
     "ASSETFRAME_CRITIC_MODEL": "claude-haiku-4-5-20251001",  # adversarial review = cheap/fast Haiku
     "ASSETFRAME_AUTHOR_BRIEFS": "1",
@@ -284,6 +287,8 @@ RUNTIME_CONFIG = Path("config/engine.json")
 # silently dropped newer knobs (ASSETFRAME_BRIEF_BATCH / _CRITIC_MODEL / _BRIEF_CONCURRENCY were set
 # in engine.json but never reached os.environ, so batch mode never engaged). Single source of truth.
 SETTABLE_RUNTIME_KEYS = tuple(RUNTIME_DEFAULTS)
+# Default feed per license mode (only used when ADVISOR_DATA_PROVIDER is not explicitly pinned).
+_LICENSE_DEFAULT_PROVIDER = {"personal": "yahoo", "commercial": "twelvedata"}
 
 
 def apply_runtime_env(path=RUNTIME_CONFIG):
@@ -301,4 +306,11 @@ def apply_runtime_env(path=RUNTIME_CONFIG):
         if k in raw and raw[k] not in (None, ""):
             os.environ.setdefault(k, str(raw[k]))
             applied[k] = str(raw[k])
+    # Data-license mode picks the DEFAULT feed so flipping to commercial is one knob. An explicit
+    # ADVISOR_DATA_PROVIDER (env or engine.json, already setdefault-ed above) still wins, and env
+    # always wins over both — preserving the env-first contract.
+    if "ADVISOR_DATA_PROVIDER" not in os.environ:
+        lic = os.environ.get("ASSETFRAME_DATA_LICENSE", RUNTIME_DEFAULTS["ASSETFRAME_DATA_LICENSE"])
+        os.environ["ADVISOR_DATA_PROVIDER"] = _LICENSE_DEFAULT_PROVIDER.get(lic, "yahoo")
+        applied["ADVISOR_DATA_PROVIDER"] = os.environ["ADVISOR_DATA_PROVIDER"]
     return applied

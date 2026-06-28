@@ -142,9 +142,11 @@ def loop(interval):
         n += 1
         try:
             engine_ops.heartbeat_upstash()   # cheap; returns None (no-op) when Upstash is unset
-            do_neon = (not engine_ops.upstash_enabled()
-                       or engine_ops.wake_pending()
-                       or n % SAFETY_NEON_EVERY == 0)
+            do_neon = (not reaped                       # FORCE the first pass: run startup reap +
+                       or not engine_ops.upstash_enabled()  # config-sync immediately on (re)start, not
+                       or engine_ops.wake_pending()         # up to SAFETY_NEON_EVERY ticks (~30 min)
+                       or n % SAFETY_NEON_EVERY == 0)       # later — else the box runs the stale
+                                                            # bootstrap universe after a deploy.
             if do_neon:
                 with engine_ops.connect() as conn:
                     engine_ops.clear_wake()   # going to Neon now; a request enqueued mid-drain re-sets it

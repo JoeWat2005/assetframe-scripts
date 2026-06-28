@@ -156,6 +156,10 @@ def load_catalog(reports_dir, include_dev, since=None):
             "scoredCadence": m.get("scored_cadence") or cadence_of(m.get("report_id")),
             "chartIntervals": m.get("chart_intervals") or [],
             "forecastWindow": m.get("forecast_window", ""),
+            # data-source provenance (for the report-page licensing badge + commercial-mode audit)
+            "dataProvider": m.get("data_provider", ""),
+            "dataLicense": m.get("data_license_mode", "personal"),
+            "dataLicenseDegraded": bool(m.get("data_license_degraded")),
             # Approval gate: hidden until an admin un-hides (auto-publish assets ship visible).
             "hidden": policy != "auto",
             "freeHtml": f"{base}/free.html",

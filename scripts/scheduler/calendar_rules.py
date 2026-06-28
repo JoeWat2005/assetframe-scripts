@@ -138,14 +138,18 @@ def _calendar_key(asset):
 
 
 def _target_date(asset, now):
-    """Local calendar date of the session this run targets. A 06:00 Europe/London run
-    maps to the same local date in US zones (NY ~01:00), so the run date in the asset's
-    zone is the right basis for the daily cadence decision."""
-    try:
-        from zoneinfo import ZoneInfo
-        return now.astimezone(ZoneInfo(asset.get("timezone", "UTC"))).date()
-    except Exception:
-        return now.astimezone(timezone.utc).date()
+    """Calendar date of the session this run targets = the run's UTC date.
+
+    The daily timer fires at 04:00 UTC, BEFORE every supported venue opens that same UTC day
+    (UK ~08:00 UTC, US ~14:30 UTC; crypto/FX have no exchange calendar), so the run's UTC date is
+    the date of the session being prepared. Converting to the asset's LOCAL zone instead was a
+    DST bug: at 04:00 UTC in EST winter a New York asset reads 23:00 the PREVIOUS day, so Mondays
+    resolved to Sunday (rejected as weekend) and Saturdays to Friday (a spurious weekend report).
+    `asset` is kept in the signature for callers; a venue that opens before ~04:00 UTC (e.g. Tokyo)
+    would need session-open-aware targeting rather than the plain UTC date."""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now.astimezone(timezone.utc).date()
 
 
 def holiday_coverage(holidays=None):

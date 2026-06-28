@@ -933,6 +933,35 @@ def run_qa(p):
     caps = sorted({w for t in texts for w in re.findall(r"\b[A-Z]{3,}\b", t)} - CAPS_ALLOW)
     if caps:
         warns.append("all-caps words in narrative (use sentence case): " + ", ".join(caps[:8]))
+    # --- fabricated price-level scan (WARN only; NEVER blocks the run). Catches a hallucinated price
+    # (e.g. "resistance at 4,521") in the authored NARRATIVE that isn't backed by a canonical level.
+    # Setups/ladder are already level-bound (errs above); free-text numbers were the gap. Tightly
+    # scoped to avoid noise: only price-like tokens (a decimal or thousands-grouped number), only
+    # those in the instrument's price BAND, only those NOT near any canonical level — so RSI/ATR
+    # values, percentages, years and small integers are excluded by construction.
+    try:
+        band = [float(v) for v in level_vals] + ([float(last)] if last else [])
+        if band:
+            blo, bhi, tol = min(band) * 0.95, max(band) * 1.05, 0.0025
+            bad = set()
+            for t in texts:
+                for m in re.finditer(r"(?<![\d.])(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+)", t):
+                    if t[m.end():m.end() + 1] == "%":
+                        continue                          # a percentage, not a price
+                    try:
+                        num = float(m.group(0).replace(",", ""))
+                    except ValueError:
+                        continue
+                    if not (blo <= num <= bhi):
+                        continue                          # outside the price band -> not a price claim
+                    if any(abs(num - lv) <= tol * max(1.0, abs(lv)) for lv in band):
+                        continue                          # near a canonical level/last -> fine
+                    bad.add(m.group(0))
+            for s in sorted(bad)[:6]:
+                warns.append(f"narrative cites price-like '{s}' with no matching canonical level "
+                             f"(possible fabricated number — verify)")
+    except Exception:
+        pass
     # catalyst-status line required when a claim drives the thesis
     if (any(cl.get("used_in_thesis") for cl in meta.get("high_impact_claims", []))
             and not p["pro"].get("catalyst_status")):

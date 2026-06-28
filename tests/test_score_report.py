@@ -167,7 +167,10 @@ class TestLoadBars(unittest.TestCase):
         self.addCleanup(os.remove, path)
         return path
 
-    def test_window_filter_inclusive(self):
+    def test_window_filter_excludes_post_close_bar(self):
+        # Bars are stamped at bar-OPEN. For a window ending 11:00, the 11:00-stamped bar covers
+        # 11:00..12:00 and closes at 12:00 -> ONE HOUR of look-ahead; it must be excluded. The
+        # 10:00-stamped bar (covers 10:00..11:00, closes AT the 11:00 window-end) is the real close.
         path = self._write_csv([
             "2026-06-12 09:00,10,11,9,10,100",
             "2026-06-12 10:00,10,12,10,11,100",
@@ -176,9 +179,10 @@ class TestLoadBars(unittest.TestCase):
         start = S.parse_dt("2026-06-12 10:00")
         end = S.parse_dt("2026-06-12 11:00")
         bars = S.load_bars(path, start, end)
-        self.assertEqual(len(bars), 2)
-        self.assertEqual(bars[0]["c"], 11)
-        self.assertEqual(bars[-1]["c"], 12)
+        self.assertEqual(len(bars), 1)
+        self.assertEqual(bars[-1]["c"], 11)        # the 10:00 bar's close = the 11:00 window close
+        # the 09:00 bar (pre-window) and the 11:00 bar (post-close, look-ahead) are both excluded
+        self.assertTrue(all(b["c"] != 12 for b in bars))
 
 
 class TestAppendOnlyLedger(unittest.TestCase):

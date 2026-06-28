@@ -125,6 +125,20 @@ async function syncOne(label, url) {
         console.error(`  [${label}] edition ${id} FAILED: ${err.message}`);
       }
     }
+    // data-source provenance (best-effort, DECOUPLED from the critical upsert above): the
+    // data_provider/data_license columns are added by a later migration, so tolerate their absence
+    // — the badge just stays dark until the migration runs; the editions sync NEVER breaks on it.
+    if (e.dataProvider) {
+      try {
+        await sql.query(
+          `UPDATE editions SET data_provider=$1, data_license=$2, data_license_degraded=$3 WHERE id=$4`,
+          [orNull(e.dataProvider), orNull(e.dataLicense), !!e.dataLicenseDegraded, id]);
+      } catch (err) {
+        if (!/column .* does not exist/i.test(err.message || "")) {
+          console.warn(`  [${label}] edition ${id} provenance update skipped: ${err.message}`);
+        }
+      }
+    }
   }
 
   // 2. track record — INCREMENTAL UPSERT (no global DELETE; every write is keyed + idempotent):

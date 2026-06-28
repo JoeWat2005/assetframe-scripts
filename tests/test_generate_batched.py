@@ -103,15 +103,57 @@ def test_batched_reject_skips_finish(monkeypatch, tmp_path):
         it["ticker"]: {"brief": {"name": it["ticker"]}, "telemetry": {}, "error": None}
         for it in items})
     monkeypatch.setattr(RD.brief_batch, "review_briefs", lambda items, **kw: {
-        it["ticker"]: {"decision": "reject", "summary": "fabricated level", "_telemetry": {}}
+        it["ticker"]: {"decision": "reject", "summary": "fabricated level",
+                       "publish_blockers": ["fabricated level 4521 not in canonical set"],
+                       "_telemetry": {}}                # a GENUINE blocker-backed reject
         for it in items})
-    # finish must NOT run for a rejected brief
+    # finish must NOT run for a (blocker-backed) rejected brief
     monkeypatch.setattr(RD, "_finish_asset", lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("finish should not run on reject")))
 
     jobs = RD.generate_due_batched([_asset("BTC")], NOW, no_render=True, as_of=None, workers=1)
     assert jobs[0]["status"] == "brief_rejected"
     assert not (tmp_path / "BTC_research_brief.json").exists()   # rejected draft removed
+
+
+def test_batched_blockerless_reject_is_downgraded_to_publish(monkeypatch, tmp_path):
+    # A 'reject' that cites NO concrete blocker is over-cautious (common from the cheap Haiku critic)
+    # and must NOT silently lose the report — it downgrades to publish (the rendered-report QA gate
+    # is the hard backstop). Mirrors the sync-path guard.
+    _common(monkeypatch, tmp_path)
+    monkeypatch.setattr(RD.brief_batch, "author_briefs", lambda items, **kw: {
+        it["ticker"]: {"brief": {"name": it["ticker"]}, "telemetry": {}, "error": None}
+        for it in items})
+    monkeypatch.setattr(RD.brief_batch, "review_briefs", lambda items, **kw: {
+        it["ticker"]: {"decision": "reject", "summary": "feels weak", "_telemetry": {}}  # no blockers
+        for it in items})
+    finished = []
+    monkeypatch.setattr(RD, "_finish_asset",
+                        lambda asset, *a, **k: finished.append(asset["ticker"]))
+
+    jobs = RD.generate_due_batched([_asset("BTC")], NOW, no_render=True, as_of=None, workers=1)
+    assert jobs[0]["critic_decision"] == "revise"        # downgraded
+    assert "downgraded" in jobs[0]["critic_summary"]
+    assert finished == ["BTC"]                            # it proceeded to finish, not skipped
+
+
+def test_critic_batch_failure_recritiques_from_disk(monkeypatch, tmp_path):
+    # A critic-BATCH failure must re-critique the already-authored briefs SYNCHRONOUSLY (not degrade
+    # to needs_brief, not re-author). With the sync critic approving, the asset still generates.
+    _common(monkeypatch, tmp_path)
+    monkeypatch.setattr(RD.brief_batch, "author_briefs", lambda items, **kw: {
+        it["ticker"]: {"brief": {"name": it["ticker"]}, "telemetry": {}, "error": None}
+        for it in items})
+    monkeypatch.setattr(RD.brief_batch, "review_briefs",
+                        lambda items, **kw: (_ for _ in ()).throw(RuntimeError("batch submit failed")))
+    # the synchronous critic subprocess (_run_rc) approves the on-disk brief
+    monkeypatch.setattr(RD, "_run_rc",
+                        lambda cmd, **k: (True, 0, json.dumps({"decision": "approve", "summary": "ok"}), ""))
+    monkeypatch.setattr(RD, "_finish_asset", _finish_generated)
+
+    jobs = RD.generate_due_batched([_asset("BTC")], NOW, no_render=True, as_of=None, workers=1)
+    assert jobs[0]["status"] == "generated"          # salvaged, not degraded to needs_brief
+    assert jobs[0]["critic_decision"] == "approve"
 
 
 def test_batched_author_failure_needs_brief(monkeypatch, tmp_path):

@@ -84,6 +84,49 @@ from pathlib import Path
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 PROVIDER_DEFAULT = os.environ.get("ADVISOR_DATA_PROVIDER", "yahoo")
+# Data-license mode: "personal" (default, today's behaviour incl. free Yahoo/CoinGecko fallbacks)
+# or "commercial" (a series sourced from a non-commercial feed is flagged license_degraded so the
+# provenance marks it not-for-redistribution). Set via ASSETFRAME_DATA_LICENSE / engine.json.
+DATA_LICENSE = os.environ.get("ASSETFRAME_DATA_LICENSE", "personal")
+
+# Which feeds may legally back a PAID, published report. `commercial=True` is an OPERATOR ASSERTION
+# that the named redistribution contract is signed — flip it ONLY when the plan is actually in place.
+# Yahoo (unofficial chart API) and the keyless CoinGecko Demo tier have NO commercial/redistribution
+# licence and no upgrade path, so they can never back a sellable report.
+PROVIDER_REGISTRY = {
+    #              commercial  needs_key   required plan / note
+    "yahoo":      {"commercial": False, "needs_key": False},   # personal use only; no commercial tier
+    "coingecko":  {"commercial": False, "needs_key": False},   # keyless Demo tier = non-commercial
+    "twelvedata": {"commercial": True,  "needs_key": True},    # Business plan + Redistribution Add-On
+    "eodhd":      {"commercial": True,  "needs_key": True},    # Commercial plan + redistribution approval
+}
+
+
+def provider_is_commercial(provider):
+    """True if `provider` may back a paid, published report (per PROVIDER_REGISTRY)."""
+    return bool(PROVIDER_REGISTRY.get(provider, {}).get("commercial"))
+
+
+def series_license(provider):
+    """License tag for a fetched series given its resolved provider: 'commercial' | 'non_commercial'."""
+    return "commercial" if provider_is_commercial(provider) else "non_commercial"
+
+
+def license_fields(hourly_provider, daily_provider, mode=None):
+    """License-provenance fields for the analysis `provider` block. `license_degraded` is True only
+    in commercial mode when a fetched series came from a non-commercial feed (the report still
+    publishes, but the provenance marks it not-for-redistribution). A None provider = no such series,
+    so it can't degrade anything."""
+    mode = mode or DATA_LICENSE
+    degraded = mode == "commercial" and (
+        (hourly_provider is not None and not provider_is_commercial(hourly_provider)) or
+        (daily_provider is not None and not provider_is_commercial(daily_provider)))
+    return {
+        "license_mode": mode,
+        "hourly_license": series_license(hourly_provider) if hourly_provider is not None else None,
+        "daily_license": series_license(daily_provider) if daily_provider is not None else None,
+        "license_degraded": bool(degraded),
+    }
 
 
 def _http_json(url, retries=2, backoff=1.0):
@@ -1209,7 +1252,10 @@ def main():
         "windows": windows,
         "provider": {"hourly": meta_h.get("provider") if meta_h else None,
                      "daily": meta_d.get("provider") if meta_d else None,
-                     "note": "; ".join(notes) if notes else None},
+                     "note": "; ".join(notes) if notes else None,
+                     # license provenance: in commercial mode a non-commercial source -> degraded.
+                     **license_fields(meta_h.get("provider") if meta_h else None,
+                                      meta_d.get("provider") if meta_d else None)},
         "hourly": hourly_block,
         "trend": {
             "long_term_daily": lt_trend,

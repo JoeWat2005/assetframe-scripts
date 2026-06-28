@@ -94,7 +94,13 @@ def load_bars(path, start, end):
                     o, h, l, c = float(r[1]), float(r[2]), float(r[3]), float(r[4])
                 except (ValueError, IndexError):
                     continue
-                if start <= t <= end:
+                # Bars are stamped at bar-OPEN (Yahoo's chart timestamp = period start; see
+                # intraday.py). The bar stamped exactly at `end` covers end..end+1h, so its close
+                # is the price ONE HOUR AFTER the window shut -> look-ahead. Exclude it with a
+                # strict `< end`: the true close bar (stamped end-1h, closing AT `end`) is still
+                # included. Critical for crypto/mid-week-FX, where that post-close bar exists at
+                # score time now that _refresh_candles_for_scoring fetches up to now.
+                if start <= t < end:
                     bars.append({"t": t, "o": o, "h": h, "l": l, "c": c})
     return bars
 

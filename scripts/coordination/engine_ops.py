@@ -904,13 +904,16 @@ _SETTABLE_CONFIG_KEYS = {
     "ASSETFRAME_AUTHOR_BRIEFS", "ADVISOR_DATA_PROVIDER", "ASSETFRAME_RUN_TIMEOUT",
     "ASSETFRAME_BRIEF_MODEL", "ASSETFRAME_RETENTION_DAYS",
     "ASSETFRAME_BRIEF_BATCH", "ASSETFRAME_CRITIC_MODEL", "ASSETFRAME_BRIEF_CONCURRENCY",
-    "ASSETFRAME_BRIEF_WEB_MAX_USES",
+    "ASSETFRAME_BRIEF_WEB_MAX_USES", "ASSETFRAME_DATA_LICENSE", "TWELVEDATA_RATE_PER_MIN",
 }
 # Per-key value validators — reject a value that would brick the box via an allow-listed key. In
 # particular ASSETFRAME_RUN_TIMEOUT is int()-parsed at import; a non-integer would crash-loop the
 # poller. A key with no validator only gets the generic single-line / length check.
 _CONFIG_VALUE_VALIDATORS = {
-    "ASSETFRAME_RUN_TIMEOUT": lambda v: v.isdigit() and 60 <= int(v) <= 86400,
+    # Generation kill-timeout. Capped at 7200 so generate (<=RUN_TIMEOUT) + publish (up to 3x900s)
+    # stays under the daily oneshot's systemd TimeoutStartSec=10800 — else systemd SIGKILLs mid-publish
+    # and orphans the engine_runs row. 7200 still leaves the batch path its full budget at 4-5 assets.
+    "ASSETFRAME_RUN_TIMEOUT": lambda v: v.isdigit() and 60 <= int(v) <= 7200,
     # Brief / critic model must be a Claude id (a typo here would break every brief). Allow-list shape.
     "ASSETFRAME_BRIEF_MODEL": lambda v: v.startswith("claude-") and 8 <= len(v) <= 60,
     "ASSETFRAME_CRITIC_MODEL": lambda v: v.startswith("claude-") and 8 <= len(v) <= 60,
@@ -921,6 +924,12 @@ _CONFIG_VALUE_VALIDATORS = {
     "ASSETFRAME_BRIEF_CONCURRENCY": lambda v: v.isdigit() and 1 <= int(v) <= 16,
     # Web searches per news-on brief (input-cost dial). Bounded so a typo can't run away.
     "ASSETFRAME_BRIEF_WEB_MAX_USES": lambda v: v.isdigit() and 1 <= int(v) <= 15,
+    # Data-license mode: commercial = only commercially-licensed feeds back a published report.
+    "ASSETFRAME_DATA_LICENSE": lambda v: v in ("personal", "commercial"),
+    # Active data feed. Allow-list closes the silent-fallback trap (a typo -> Yahoo with only a note).
+    "ADVISOR_DATA_PROVIDER": lambda v: v in ("yahoo", "twelvedata", "eodhd", "coingecko"),
+    # TwelveData requests/min pacing (0 = no throttle). Bounded so a typo can't disable pacing wildly.
+    "TWELVEDATA_RATE_PER_MIN": lambda v: v.isdigit() and 0 <= int(v) <= 1000,
 }
 # tail_logs may only read these systemd units (prevents arbitrary -u injection).
 _KNOWN_POLLER_UNITS = {"assetframe-poller.service", "assetframe-poller-dev.service"}
