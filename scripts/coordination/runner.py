@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 from _paths import ROOT, SCRIPTS
 from locking import _FileLock, LOCK_PATH
-from db import set_current_run, is_cancel_requested, _utcnow, RUN_TIMEOUT
+from db import set_current_run, is_cancel_requested, _utcnow, RUN_TIMEOUT, _empty_dir
 from manifest import scope_to_run_args, _read_run_manifest, summarize_manifest, _new_run_id, _tail
 
 RUN_DAILY = "scripts.scheduler.run_daily"          # spawned as `python -m <module>` (cwd = ROOT)
@@ -169,19 +169,8 @@ def _wipe_sandbox_state(conn):
     Neon backtest_results / backtest_predictions tables. This stops leftover rows from a previous
     backtest (e.g. an already-scored window) bleeding into the new run. ONLY ever touches sandbox
     state — never the live ledger, editions, scored_results or reports. Best-effort; never raises."""
-    import shutil
     for sub in SANDBOX_DIRS:
-        d = ROOT / sub
-        if not d.is_dir():
-            continue
-        for child in d.iterdir():
-            try:
-                if child.is_dir():
-                    shutil.rmtree(child, ignore_errors=True)
-                else:
-                    child.unlink()
-            except Exception:
-                pass
+        _empty_dir(ROOT / sub)
     for tbl in ("backtest_predictions", "backtest_results"):
         try:
             conn.execute(f"DELETE FROM {tbl}")   # admin-only sandbox tables (never the live track record)

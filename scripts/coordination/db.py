@@ -183,3 +183,18 @@ def reap_stale_runs(conn, max_age_s=None):
             "  (SELECT id FROM engine_runs WHERE status = 'running')")
     except Exception:
         pass
+
+
+def _empty_dir(path):
+    """Remove every child of `path` (files -> unlink, dirs -> rmtree); no-op if `path` isn't a dir.
+    Per-child errors are swallowed. Returns True iff `path` was a directory (so callers can record
+    which dirs they actually cleared). Shared by runner._wipe_sandbox_state + commands clear handlers."""
+    import shutil
+    if not path.is_dir():
+        return False
+    for child in path.iterdir():
+        try:
+            shutil.rmtree(child, ignore_errors=True) if child.is_dir() else child.unlink()
+        except Exception:
+            pass
+    return True

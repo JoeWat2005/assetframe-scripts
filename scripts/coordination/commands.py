@@ -6,7 +6,7 @@ import psycopg
 
 from _paths import ROOT, SCRIPTS
 from locking import _FileLock, LOCK_PATH
-from db import _load_dotenv_into_environ
+from db import _load_dotenv_into_environ, _empty_dir
 from wake import upstash_enabled, _upstash, HEARTBEAT_KEY, clear_wake
 from manifest import _tail, _read_run_manifest
 from runner import _publish_chain, run_backtest_batch, RUN_DAILY, MAX_BACKTEST_DAYS, SANDBOX_DIRS
@@ -389,25 +389,14 @@ def _cmd_clear_reports(conn, args):
     """Clear the engine's working dirs (reports/data/content/runs) on the box — a dashboard-driven
     system refresh, so you never need SSH + sudo. The ledger is NOT touched (use reset_ledger).
     Held under the run lock so it never deletes mid-generation."""
-    import shutil
     subdirs = ["reports", "data/payloads", "data/predictions", "data/analysis", "data/candles",
                "content", "runs"]
     cleared = []
     try:
         with _FileLock(LOCK_PATH, blocking=False):
             for sub in subdirs:
-                d = ROOT / sub
-                if not d.is_dir():
-                    continue
-                for child in d.iterdir():
-                    try:
-                        if child.is_dir():
-                            shutil.rmtree(child, ignore_errors=True)
-                        else:
-                            child.unlink()
-                    except Exception:
-                        pass
-                cleared.append(sub)
+                if _empty_dir(ROOT / sub):
+                    cleared.append(sub)
     except _FileLock.Locked:
         return False, "another run is in progress — retry clear_reports shortly", None, False
     return True, f"cleared working dirs: {', '.join(cleared) or '(none present)'}", None, False
@@ -609,23 +598,12 @@ def _cmd_clear_sandbox(conn, args):
     the data/predictions/sim/scored/ per-prediction sidecars are wiped too. Mirrors _cmd_clear_reports'
     safe per-dir clearing and is held under the run lock so it never deletes mid-backtest. The Neon
     backtest_results / backtest_predictions tables are cleared separately."""
-    import shutil
     cleared = []
     try:
         with _FileLock(LOCK_PATH, blocking=False):
             for sub in SANDBOX_DIRS:
-                d = ROOT / sub
-                if not d.is_dir():
-                    continue
-                for child in d.iterdir():
-                    try:
-                        if child.is_dir():
-                            shutil.rmtree(child, ignore_errors=True)
-                        else:
-                            child.unlink()
-                    except Exception:
-                        pass
-                cleared.append(sub)
+                if _empty_dir(ROOT / sub):
+                    cleared.append(sub)
     except _FileLock.Locked:
         return False, "another run is in progress — retry clear_sandbox shortly", None, False
     return True, f"cleared sandbox dirs: {', '.join(cleared) or '(none present)'}", None, False
