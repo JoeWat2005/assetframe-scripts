@@ -31,9 +31,12 @@ import sys
 _MODEL_PRICES = {"haiku": (1.0, 5.0), "sonnet": (3.0, 15.0), "opus": (15.0, 75.0)}
 
 
-def resolve_prices(model, fallback=None):
-    """(price_in, price_out) per MTok for a model id, by family substring. Unknown models fall back
-    to `fallback` (brief_writer's env-configurable Sonnet prices at the call sites) or list Sonnet."""
+def resolve_prices(model, fallback=None, override=None):
+    """(price_in, price_out) per MTok for a model id. Precedence: an EXPLICIT operator `override`
+    (ANTHROPIC_PRICE_IN/OUT set in the env) wins over everything; else the model-family table (by
+    substring); else `fallback` (the env-default prices at the call sites); else list Sonnet."""
+    if override is not None:
+        return override
     m = (model or "").lower()
     for key, price in _MODEL_PRICES.items():
         if key in m:
@@ -47,13 +50,15 @@ class AnthropicBriefClient:
     module's `_client(_require_sdk())` so the DI seam (and the tests' monkeypatches) keep working —
     never let it build a client itself."""
 
-    def __init__(self, client, model, *, batch=False, default_max_tokens=None, price_fallback=None):
+    def __init__(self, client, model, *, batch=False, default_max_tokens=None,
+                 price_fallback=None, price_override=None):
         self.client = client
         self.model = model
         self.batch = batch
         self.default_max_tokens = default_max_tokens
         # Resolve the price ONCE (model-aware) — this is the fix for the critic's Sonnet-priced cost.
-        self.price_in, self.price_out = resolve_prices(model, price_fallback)
+        # An explicit operator override (env-set) still wins over the model table.
+        self.price_in, self.price_out = resolve_prices(model, price_fallback, price_override)
 
     # ------------------------------------------------------------------ primitives
 

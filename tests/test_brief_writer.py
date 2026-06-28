@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -165,6 +166,40 @@ class TestPromptBuild(unittest.TestCase):
         msg = BW.build_user_message("BTC", {}, {"x": 1}, None, None, guidance=None)
         self.assertNotIn("REVISION GUIDANCE", msg)
         self.assertIn("CONTEXT", msg)
+
+
+class TestPriceResolution(unittest.TestCase):
+    """resolve_prices precedence (Phase-4 review fix): an EXPLICIT operator override wins over the
+    per-model table; otherwise the model-family table applies; otherwise the env-default fallback."""
+
+    def test_model_table_beats_fallback(self):
+        from anthropic_client import resolve_prices
+        # a recognised family resolves from the table, NOT the (Sonnet) fallback — the critic-mispricing fix
+        self.assertEqual(resolve_prices("claude-haiku-4-5", (3.0, 15.0)), (1.0, 5.0))
+        self.assertEqual(resolve_prices("claude-sonnet-4-6", (3.0, 15.0)), (3.0, 15.0))
+
+    def test_unknown_model_uses_fallback(self):
+        from anthropic_client import resolve_prices
+        self.assertEqual(resolve_prices("some-future-model", (2.5, 9.0)), (2.5, 9.0))
+
+    def test_explicit_override_wins_over_model_table(self):
+        from anthropic_client import resolve_prices
+        # the documented ANTHROPIC_PRICE_IN/OUT knob: when set, it overrides even a recognised model
+        self.assertEqual(resolve_prices("claude-haiku-4-5", (3.0, 15.0), (2.5, 9.0)), (2.5, 9.0))
+
+    def test_brief_writer_override_only_set_when_env_present(self):
+        # PRICE_OVERRIDE must stay None unless the operator actually set the env var, else the
+        # Sonnet-default PRICE_* would wrongly force Sonnet rates onto a Haiku/Opus run.
+        import importlib
+        for present in (False, True):
+            with mock.patch.dict(os.environ):   # snapshot the real env; restored on context exit
+                os.environ.pop("ANTHROPIC_PRICE_IN", None)
+                os.environ.pop("ANTHROPIC_PRICE_OUT", None)
+                if present:
+                    os.environ["ANTHROPIC_PRICE_IN"] = "4.2"
+                bw = importlib.reload(BW)
+                self.assertEqual(bw.PRICE_OVERRIDE is not None, present)
+        importlib.reload(BW)   # restore module to ambient env for any later test
 
 
 if __name__ == "__main__":

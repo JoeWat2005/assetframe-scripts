@@ -87,8 +87,9 @@ def _cid(ticker, id2tk):
 
 def _model_prices(model):
     """(price_in, price_out) per MTok for `model` — thin wrapper over anthropic_client.resolve_prices
-    with brief_writer's env-configured Sonnet prices as the unrecognised-model fallback."""
-    return resolve_prices(model, (bw.PRICE_IN_PER_MTOK, bw.PRICE_OUT_PER_MTOK))
+    with brief_writer's env-configured Sonnet prices as the unrecognised-model fallback (and its
+    explicit env override, when set, taking precedence over the model table)."""
+    return resolve_prices(model, (bw.PRICE_IN_PER_MTOK, bw.PRICE_OUT_PER_MTOK), bw.PRICE_OVERRIDE)
 
 
 def _telemetry(message, model):
@@ -97,7 +98,8 @@ def _telemetry(message, model):
     drives the manifest's est_cost_usd only. input_tokens is the NON-cache input (same basis as the
     synchronous writer's telemetry); cache reads/writes are tracked separately, folded into cost."""
     abc = AnthropicBriefClient(None, model, batch=True,
-                               price_fallback=(bw.PRICE_IN_PER_MTOK, bw.PRICE_OUT_PER_MTOK))
+                               price_fallback=(bw.PRICE_IN_PER_MTOK, bw.PRICE_OUT_PER_MTOK),
+                               price_override=bw.PRICE_OVERRIDE)
     u = abc.usage(message)
     cost = abc.cost(u["input"], u["output"], u["cache_read"], u["cache_write"])
     return {"model": model, "input_tokens": u["input"], "output_tokens": u["output"],

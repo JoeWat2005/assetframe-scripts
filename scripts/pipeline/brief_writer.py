@@ -58,6 +58,12 @@ DEFAULT_MAX_TOKENS = 20000  # a full brief is ~7k tok of JSON and web_search too
 # the ledger records the live `usage` numbers, not this estimate). Override via env.
 PRICE_IN_PER_MTOK = float(os.environ.get("ANTHROPIC_PRICE_IN", "3.0"))     # Sonnet 4.6 defaults
 PRICE_OUT_PER_MTOK = float(os.environ.get("ANTHROPIC_PRICE_OUT", "15.0"))
+# An EXPLICIT operator price override (either env var actually set) wins over the per-model price
+# table in resolve_prices; left None when unset so the model-aware table (the critic-mispricing fix)
+# stays in force. The presence check matters: PRICE_*_PER_MTOK default to the Sonnet list price, so
+# passing them unconditionally would wrongly force Sonnet rates onto a Haiku/Opus run.
+PRICE_OVERRIDE = ((PRICE_IN_PER_MTOK, PRICE_OUT_PER_MTOK)
+                  if {"ANTHROPIC_PRICE_IN", "ANTHROPIC_PRICE_OUT"} & set(os.environ) else None)
 
 # The schema contract (enums + validate_brief) lives in brief_schema.py now; re-exported so
 # brief_writer.<name> and critic/brief_batch (which reach it via brief_writer) are unchanged.
@@ -389,9 +395,9 @@ def _extract_json(blocks):
 
 
 def _usage_line(model, usage_in, usage_out, web_searches, attempts):
-    # Model-aware pricing (was Sonnet-fixed): resolve the per-MTok rate by model family, falling
-    # back to the env-configurable PRICE_* (default Sonnet) for an unrecognised model id.
-    p_in, p_out = resolve_prices(model, (PRICE_IN_PER_MTOK, PRICE_OUT_PER_MTOK))
+    # Model-aware pricing (was Sonnet-fixed): an explicit env override wins; else resolve the per-MTok
+    # rate by model family, falling back to the env-default PRICE_* (Sonnet) for an unrecognised id.
+    p_in, p_out = resolve_prices(model, (PRICE_IN_PER_MTOK, PRICE_OUT_PER_MTOK), PRICE_OVERRIDE)
     cost = (usage_in / 1e6) * p_in + (usage_out / 1e6) * p_out
     return (f"brief_writer: model={model} attempts={attempts} "
             f"in_tok={usage_in} out_tok={usage_out} web_searches={web_searches} "
@@ -431,7 +437,8 @@ def author_brief(ticker, analysis, memory_pack, research, social, *, model,
     Prompt caching note: the (identical) SYSTEM_PROMPT carries an ephemeral cache breakpoint, so the
     rules block is written once (1.25x) and read at 0.1x across every resume/repair turn this run."""
     abc = AnthropicBriefClient(_client(_require_sdk()), model, default_max_tokens=max_tokens,
-                               price_fallback=(PRICE_IN_PER_MTOK, PRICE_OUT_PER_MTOK))
+                               price_fallback=(PRICE_IN_PER_MTOK, PRICE_OUT_PER_MTOK),
+                               price_override=PRICE_OVERRIDE)
     return abc.author(ticker, analysis, memory_pack, research, social,
                       guidance=guidance, include_news=include_news, max_tokens=max_tokens)
 

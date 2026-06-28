@@ -131,9 +131,13 @@ def run_and_record(conn, trigger, scope, request_id=None, sandbox=False):
         status, errors = "failed", f"run_and_record error: {ex}"[:500]
         log_excerpt = errors
 
-    # 5. record the outcome.
-    rec.finish(status, results, errors, log_excerpt)
+    # 5. record the outcome. Finish the REQUEST row FIRST, then rec.finish() (which writes the
+    # terminal engine_runs row and clears current_run_id LAST). Ordering is load-bearing: a stale
+    # current_run_id self-heals via reap_stale_runs, but a generation_request stuck at 'running'
+    # has no reaper — so it must be marked terminal before we release the run, else a crash between
+    # the two writes would strand it forever. (Do NOT reorder these.)
     _finish_request(conn, request_id, _request_status(status), run_id, errors)
+    rec.finish(status, results, errors, log_excerpt)
     return run_id
 
 
