@@ -755,9 +755,13 @@ def main():
     regime = taxonomy.normalize_market_regime(brief.get("market_regime"), analysis)
     pred_type = taxonomy.validate_prediction_type((brief.get("primary_prediction") or {}).get("type", "range_hold"))
 
-    # primary setup = the one matching the brief's preferred side, else the first
+    # primary setup = the one matching the brief's preferred side, else the first. An explicit 'wait'
+    # means the analyst DECLINED a directional setup, so record NONE (mirrors build_predictions_spec
+    # not registering a directional bet the analyst didn't make — never derive confidence/ledger setup
+    # from a setup that was passed on).
     side = (brief.get("preferred_setup") or {}).get("side")
-    primary = next((s for s in setups if s["direction"] == side), setups[0] if setups else None)
+    primary = (None if side == "wait"
+               else next((s for s in setups if s["direction"] == side), setups[0] if setups else None))
     conf = conf_engine.compute_confidence(analysis, primary, brief, research, social,
                                           ledger_ctx, calib,
                                           options_included=brief.get("options_context_included", False),

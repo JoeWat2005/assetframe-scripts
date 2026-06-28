@@ -507,7 +507,10 @@ def main():
         # session day of the live/forming daily bar under the roll convention
         def _sess_date(ts):
             return datetime.fromtimestamp(ts - roll * 3600, tz=timezone.utc).date()
-        today_sess = _sess_date(datetime.now(timezone.utc).timestamp())
+        # Honour the --as-of cutoff (like the bar-trim/freshness/last_price paths) so a backdated
+        # anchored run treats the cutoff day as the in-progress session and never anchors on it
+        # (look-ahead). cutoff_dt is None for live runs -> unchanged.
+        today_sess = _sess_date((cutoff_dt or datetime.now(timezone.utc)).timestamp())
         # candidates = daily bars whose session day is already completed (< today's)
         completed = [(i, r) for i, r in enumerate(daily) if _sess_date(r["ts"]) < today_sess]
         if not completed:  # clock/data edge: treat all-but-last as completed

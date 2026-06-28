@@ -160,9 +160,12 @@ def load_catalog(reports_dir, include_dev, since=None):
             "dataLicenseDegraded": bool(m.get("data_license_degraded")),
             # Approval gate: hidden until an admin un-hides (auto-publish assets ship visible).
             "hidden": policy != "auto",
-            "freeHtml": f"{base}/free.html",
-            "freePdf": f"{base}/free.pdf",
-            "preview": f"{base}/preview.png",
+            # Advertise a free asset only if it exists on disk — publish.discover uploads exactly the
+            # files that exist, so an unconditional URL for a missing file (e.g. preview.png skipped
+            # when PyMuPDF is flaky) becomes a dead R2 link / 404. Mirror the hasPro existence gate.
+            "freeHtml": f"{base}/free.html" if (d / "free.html").exists() else "",
+            "freePdf": f"{base}/free.pdf" if (d / "free.pdf").exists() else "",
+            "preview": f"{base}/preview.png" if (d / "preview.png").exists() else "",
             "hasPro": (d / "pro.html").exists(),
             "_dir": d,
         })

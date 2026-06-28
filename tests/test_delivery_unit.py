@@ -343,7 +343,7 @@ class TestLoadCatalog:
             "instrument": "Bitcoin", "ticker": "BTC", "asset_class": "crypto",
             "status": "published", "report_id": "AF-20260620-BTC",
             "data_license_mode": "commercial", "data_license_degraded": True,
-        }, extra_files=("pro.html",))
+        }, extra_files=("pro.html", "free.html"))
         _write_meta(reports, "2026-06-19", "ETH", {
             "instrument": "Ether", "ticker": "ETH", "report_id": "AF-20260619-ETH"})
         monkeypatch.setattr(EC, "_publish_policy_by_ticker", lambda: {"BTC": "auto"})

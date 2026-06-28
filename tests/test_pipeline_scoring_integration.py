@@ -383,5 +383,16 @@ class TestLedgerRowStructuralInvariant(_ChainHarness):
                              "data row column count must equal the header width")
 
 
+    def test_wait_brief_records_no_directional_setup(self):
+        # regression: the BTC fixture brief has preferred_setup.side == 'wait' (analyst DECLINED a
+        # directional setup). scaffold must record NO setup — it used to fall back to setups[0],
+        # polluting the ledger setup columns + confidence with a bet that was never taken.
+        self.write_brief()
+        self.write_csv(BEARISH_BARS)
+        preds = self.scaffold(_ts(0))
+        self.assertFalse(preds.get("setup"),
+                         f"a 'wait' brief must record no setup, got {preds.get('setup')!r}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

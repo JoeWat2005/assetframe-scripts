@@ -434,14 +434,10 @@ class TestCrossModuleEdges:
         # The advertised free.html key is NOT in R2 -> the web would 404 on a dev edition.
         assert _key_from_asset_path(dev["freeHtml"]) not in fake_r2.objects
 
-    def test_catalog_advertises_missing_files_publish_does_not_upload(self, tmp_path, monkeypatch,
-                                                                      fake_r2):
-        # LATENT CONTRACT MISMATCH (reported as a bug): export_content.load_catalog emits
-        # freeHtml/freePdf/preview UNCONDITIONALLY (export_content.py:163-165), but publish.discover
-        # only uploads files that EXIST on disk (publish.py:49-52). A partial edition (metadata +
-        # free.html, with the PDF/preview render having failed) therefore yields a catalog that
-        # advertises an R2 key publish never creates -> a broken PDF/preview link on the web.
-        # Asserting the CURRENT (divergent) behaviour so the seam is pinned.
+    def test_catalog_advertises_only_existing_free_assets(self, tmp_path, monkeypatch, fake_r2):
+        # FIXED: load_catalog now gates freeHtml/freePdf/preview on existence (mirroring hasPro), so a
+        # partial edition (metadata + free.html, PDF/preview render having failed) advertises EXACTLY
+        # the files publish.discover uploads — no dead R2 links / 404s.
         root = _seed_root(tmp_path)
         reports = root / "reports"
         _write_edition(reports, "2026-06-20", "PARTIAL", {
@@ -451,20 +447,18 @@ class TestCrossModuleEdges:
 
         catalog, _ = _run_export(monkeypatch, root)
         e = catalog[0]
-        # The catalog advertises all three free assets regardless of what exists on disk.
-        assert e["freeHtml"].endswith("/free.html")
-        assert e["freePdf"].endswith("/free.pdf")
-        assert e["preview"].endswith("/preview.png")
-        assert e["hasPro"] is False        # hasPro IS gated on existence (the conditional one)
+        assert e["freeHtml"].endswith("/free.html")   # exists -> advertised
+        assert e["freePdf"] == ""                     # absent -> NOT advertised (no dead link)
+        assert e["preview"] == ""
+        assert e["hasPro"] is False
 
         monkeypatch.setattr(PUB, "REPORTS", reports)
         monkeypatch.setattr(sys, "argv", ["publish"])
         PUB.main()
         uploaded = set(fake_r2.objects)
         assert _key_from_asset_path(e["freeHtml"]) in uploaded         # the one real file
-        # The advertised PDF + preview were NEVER uploaded -> over-advertised, dead links.
-        assert _key_from_asset_path(e["freePdf"]) not in uploaded
-        assert _key_from_asset_path(e["preview"]) not in uploaded
+        # The catalog advertises nothing that publish didn't upload (empty url => not advertised).
+        assert all(v == "" or _key_from_asset_path(v) in uploaded for v in (e["freePdf"], e["preview"]))
 
     def test_auto_publish_policy_unhides_edition_through_real_loader(self, tmp_path, monkeypatch):
         # Flip ONE asset to publish_policy "auto" in a tmp universe and confirm the whole chain
