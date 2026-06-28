@@ -1103,5 +1103,15 @@ class SnapshotErrors(unittest.TestCase):
         self.assertIn("state_error", snap)
 
 
+class FacadeReexports(unittest.TestCase):
+    def test_reexports_runrecorder_and_empty_dir(self):
+        # regression: the façade docstring claims it re-exports every db name — RunRecorder + _empty_dir
+        # were missing from the re-export.
+        import db
+        import engine_ops
+        self.assertIs(engine_ops.RunRecorder, db.RunRecorder)
+        self.assertIs(engine_ops._empty_dir, db._empty_dir)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

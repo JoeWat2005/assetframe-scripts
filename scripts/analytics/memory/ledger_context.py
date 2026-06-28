@@ -21,7 +21,7 @@ Usage:
          [--recent-k 8] [--out data/ledger_context/<NAME>_ledger_context.json]
          [--print]
 """
-import csv, json, sys
+import json, sys
 from datetime import datetime, timezone
 from pathlib import Path
 

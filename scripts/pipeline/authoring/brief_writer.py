@@ -103,6 +103,7 @@ def summarize_analysis(a):
     trend / momentum / levels / freshness. Deliberately NOT a wholesale dump — and
     note prominently that LEVEL VALUES are reference-only context, NEVER to be typed
     into the brief (the scaffold owns every price)."""
+    a = a or {}                                  # tolerate a None analysis (parity with critic)
     h = a.get("hourly") or {}
     d = a.get("daily") or {}
     fr = a.get("freshness") or {}

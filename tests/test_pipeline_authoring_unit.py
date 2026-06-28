@@ -671,5 +671,11 @@ def test_model_prices_delegates_to_table_with_bw_fallback():
     assert BB._model_prices("mystery") == (BW.PRICE_IN_PER_MTOK, BW.PRICE_OUT_PER_MTOK)
 
 
+def test_summarize_analysis_tolerates_none():
+    # regression: build_user_message feeds analysis straight to summarize_analysis; a None analysis
+    # (failed load) must not crash — parity with critic, which already guarded it.
+    assert isinstance(BW.summarize_analysis(None), dict)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

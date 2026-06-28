@@ -649,5 +649,22 @@ class TestTaxonomyExtraBranches(unittest.TestCase):
         self.assertEqual(T.asset_class_key("cme_futures", "BZ=F"), "commodity")
 
 
+class ReadLastBarGuard(unittest.TestCase):
+    def test_non_numeric_close_dies_cleanly(self):
+        # regression: a corrupt last bar must fail QA (die -> SystemExit), not raise a raw ValueError
+        import os
+        import tempfile
+        import scaffold_payload as SP
+        fd, p = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        try:
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("2026-06-17 20:00,1.0,2.0,0.5,notanumber\n")
+            with self.assertRaises(SystemExit):
+                SP.read_last_bar(p)
+        finally:
+            os.remove(p)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

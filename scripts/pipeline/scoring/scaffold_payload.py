@@ -79,7 +79,11 @@ def read_last_bar(csv_path):
                 last = r
     if not last:
         die(f"no data rows in {csv_path}")
-    return round(float(last[4]), _dp(float(last[4]))), last[0][:16]
+    try:                                          # guard the close like load_bars does — a corrupt
+        close = float(last[4])                    # last bar must fail QA cleanly, not crash the scaffold
+    except (TypeError, ValueError):
+        die(f"non-numeric close in the last data row of {csv_path}: {last[4]!r}")
+    return round(close, _dp(close)), last[0][:16]
 
 
 def load_json(path, required=False, what=""):

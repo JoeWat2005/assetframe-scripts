@@ -20,7 +20,7 @@ Usage:
          [--as-of "YYYY-MM-DD HH:MM"] [--out ledger/research_memory.json]
          [--min-n 4] [--print]
 """
-import csv, json, sys
+import json, sys
 from datetime import datetime, timezone
 from pathlib import Path
 
