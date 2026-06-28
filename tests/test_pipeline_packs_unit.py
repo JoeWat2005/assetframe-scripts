@@ -110,16 +110,16 @@ def test_rp_validate_url_falls_back_to_url_field_for_non_thesis_item():
     assert pack["items"][0]["url"] == "https://fallback.test/z"
 
 
-def test_rp_gate_rejects_thesis_item_sourced_only_by_url_field_current_behaviour():
-    # BUG DOC: _has_source() (research_pack.py:54-55) checks ONLY source_url/source,
-    # but the output normalization (line 118) mirrors the traceable `url` from
-    # source_url OR the `url` field. So a thesis item whose ONLY source is the `url`
-    # field — the exact field confidence._claim_traced reads — is rejected by the
-    # GATE as an "unsupported thesis claim". Asserting CURRENT behaviour (exit 2).
+def test_rp_gate_accepts_thesis_item_sourced_only_by_url_field():
+    # FIXED: _has_source now accepts the `url` field — the same one the output build mirrors and
+    # confidence._claim_traced reads — so a thesis item sourced only by `url` passes the gate (it used
+    # to die with exit 2 despite being fully downstream-traceable).
     item = _rp_thesis_item()
     del item["source_url"]
-    item["url"] = "https://only-url.test/z"   # has a usable traceable url, but no source_url/source
-    assert _exit_code(RP.validate, {"items": [item]}, "AAPL") == 2
+    item["url"] = "https://only-url.test/z"
+    pack = RP.validate({"items": [item]}, "AAPL")
+    assert pack["counts"]["thesis_items"] == 1
+    assert pack["items"][0]["source_url"] == "https://only-url.test/z"   # url normalised into source_url
 
 
 def test_rp_validate_instrument_falls_back_to_name():
@@ -564,13 +564,11 @@ def test_soc_main_date_defaults_to_report_date_from_meta(tmp_path, monkeypatch):
 
 
 # ============================================================ research_pack: gaps dedup quirk
-def test_rp_unsourced_gap_dedup_is_ineffective_current_behaviour():
-    # DOCUMENTS a minor pre-existing logic quirk (research_pack.py:115-116): the dedup
-    # check compares the RAW headline against `gaps`, but appends a PREFIXED string
-    # ("unsourced: <headline>"), so the guard never matches and duplicate non-thesis
-    # unsourced items with the same headline each add a gap. Asserting CURRENT behaviour.
-    item = _rp_thesis_item(used_in_thesis=False, source_url="", source="",
-                           timestamp="", headline="Same headline")
-    pack = RP.validate({"items": [dict(item), dict(item)]}, "AAPL")
+def test_rp_unsourced_gap_dedup_collapses_duplicates():
+    # FIXED: the dedup now compares the ACTUAL gap string, so duplicate unsourced non-thesis items
+    # with the same headline collapse to ONE gap.
+    base = {"category": "macro", "headline": "Same headline", "summary": "", "source_url": "",
+            "source": "", "timestamp": "", "source_quality": "medium", "used_in_thesis": False}
+    pack = RP.validate({"items": [dict(base), dict(base)]}, "AAPL")
     gaps = [g for g in pack["source_gaps"] if g.startswith("unsourced:")]
-    assert len(gaps) == 2  # duplicate, not deduplicated
+    assert len(gaps) == 1

@@ -21,7 +21,10 @@ BANNED = [r"sure trade", r"risk[- ]free(?!\s+(rate|yield|asset|benchmark))", r"e
 # fix-class as the risk-free lookahead; only a bare positive claim ("guaranteed profit") is flagged.
 NEGATED_ONLY = {"guaranteed": r"\b(no|not|never|without|nothing|cannot|none)\b|n't\b",
                 "personal recommendation": r"\b(not|no|never|nothing)\b|n't\b"}
-RR_OK = re.compile(r"^(T1 (below 1\.0x|\d+(\.\d+)?x); T2 (below 1\.0x|\d+(\.\d+)?x|\d+(\.\d+)?x .*)|No valid R:R - (excluded|setup excluded)).*$")
+# `n/a` is a legitimate target form: scaffold_payload._fmt_rr emits it for a missing target (e.g. a
+# long setup whose R1 collided away at display precision, leaving t2=None) — the QA gate must accept
+# it, else that otherwise-valid build hard-aborts.
+RR_OK = re.compile(r"^(T1 (below 1\.0x|\d+(\.\d+)?x|n/a); T2 (below 1\.0x|\d+(\.\d+)?x|\d+(\.\d+)?x .*|n/a)|No valid R:R - (excluded|setup excluded)).*$")
 RR_BAD = re.compile(r"(~\s*-\d)|(-\d+(\.\d+)?\s*/\s*-?\d+(\.\d+)?x)|(R:R[^.<]{0,30}[-−]\d)")
 QUALITY_LABELS = {"High quality", "Acceptable", "Low quality", "Management only", "No-trade"}
 CLAIM_STATUSES = {"confirmed", "multiple-source", "single-source", "unverified", "stale", "unavailable"}

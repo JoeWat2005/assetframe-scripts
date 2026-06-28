@@ -401,12 +401,13 @@ class TestQaRegexHelpers(unittest.TestCase):
         for bad in ("1.5 / 2.1", "R:R 1.5", "T1 2.0x"):
             self.assertIsNone(Q.RR_OK.match(bad), bad)
 
-    def test_rr_ok_rejects_na_target_form_BUG(self):
-        # BUG PIN: scaffold_payload._fmt_rr legitimately emits "T1 X.Xx; T2 n/a" for a setup with
-        # no R1/target level, but RR_OK has no 'n/a' branch -> run_qa flags it and ABORTS the build.
-        # Asserting CURRENT (buggy) behaviour so this test stays green; reported separately.
-        self.assertIsNone(Q.RR_OK.match("T1 2.0x; T2 n/a"))
-        self.assertIsNone(Q.RR_OK.match("T1 n/a; T2 3.0x"))
+    def test_rr_ok_accepts_na_target_form(self):
+        # FIXED: RR_OK now accepts the "n/a" target form _fmt_rr legitimately emits (missing target),
+        # so a valid build no longer hard-aborts on it.
+        self.assertIsNotNone(Q.RR_OK.match("T1 2.0x; T2 n/a"))
+        self.assertIsNotNone(Q.RR_OK.match("T1 n/a; T2 3.0x"))
+        self.assertIsNotNone(Q.RR_OK.match("T1 below 1.0x; T2 n/a"))
+        self.assertIsNotNone(Q.RR_OK.match("T1 1.5x; T2 2.1x"))   # existing valid forms still match
 
     def test_rr_bad_detects_negative_looking(self):
         self.assertTrue(Q.RR_BAD.search("~ -3"))

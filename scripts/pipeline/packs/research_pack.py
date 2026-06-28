@@ -52,7 +52,10 @@ def _now_utc():
 
 
 def _has_source(item):
-    return bool((item.get("source_url") or item.get("source") or "").strip())
+    # Accept `url` too: the output normalization (below) and the consumer confidence._claim_traced
+    # both treat `url` as a valid source field, so the GATE must agree — else a thesis item sourced
+    # only by `url` is downstream-traceable yet hard-rejected here (exit 2).
+    return bool((item.get("source_url") or item.get("source") or item.get("url") or "").strip())
 
 
 def template(name):
@@ -111,9 +114,11 @@ def validate(draft, name):
                 missing.append("timestamp")
             die(f"unsupported thesis claim: item {n} '{headline[:60]}' is used_in_thesis "
                 f"but missing {', '.join(missing)} (the AI may interpret news, never invent it)")
-        # A non-thesis item that lacks a source is a known gap, not a fact.
-        if not sourced and headline not in gaps:
-            gaps.append(f"unsourced: {headline[:80]}")
+        # A non-thesis item that lacks a source is a known gap, not a fact. Dedup on the ACTUAL gap
+        # string (not the raw headline, which is never inserted — that guard was a no-op).
+        gap = f"unsourced: {headline[:80]}"
+        if not sourced and gap not in gaps:
+            gaps.append(gap)
 
         url = (it.get("source_url") or it.get("url") or "").strip()
         items.append({
