@@ -441,9 +441,10 @@ def author_brief_step(asset, brief_path):
     if not decision:          # critic API/parse failure -> can't trust it; degrade
         res["status"] = "writer_unavailable"
         return res
-    if decision == "reject" and not _reject_is_backed(verdict):
-        decision = res["decision"] = "revise"   # over-cautious reject, no blocker cited -> publish
+    new_decision, _ = _downgrade_unbacked_reject(verdict)
+    if new_decision != decision:                # over-cautious reject downgraded -> publish
         res["critic_summary"] = "[reject downgraded: no blocker cited] " + (res["critic_summary"] or "")
+    decision = res["decision"] = new_decision
 
     # 3. No second 'repair' authoring pass. 'approve' AND 'revise' both mean the brief is PUBLISHABLE
     # (a 'revise' is minor edits) — so both GENERATE directly. The old repair pass DOUBLED the
@@ -473,6 +474,18 @@ def _reject_is_backed(verdict):
         return True
     return any(isinstance(i, dict) and i.get("severity") == "blocker"
                for i in (verdict.get("issues") or []))
+
+
+def _downgrade_unbacked_reject(verdict):
+    """The shared core of the sync + batch verdict paths: an over-cautious 'reject' with no concrete
+    blocker downgrades to 'revise' so an otherwise-publishable brief isn't silently lost (the
+    rendered-report QA gate backstops). Returns (decision, verdict) — verdict.summary is annotated (in
+    a COPY) when the downgrade fires; any other decision passes through unchanged."""
+    decision = verdict.get("decision")
+    if decision == "reject" and not _reject_is_backed(verdict):
+        return "revise", {**verdict, "summary": "[reject downgraded: no blocker cited] "
+                          + (verdict.get("summary") or "")}
+    return decision, verdict
 
 
 def _rel_to_root(p):
@@ -860,11 +873,7 @@ def generate_due_batched(due_assets, now, no_render, as_of, workers=1):
             rec["critic_summary"] = "critic unavailable for this brief"
             _seal(tk)
             continue
-        decision = verdict["decision"]
-        if decision == "reject" and not _reject_is_backed(verdict):
-            decision = "revise"        # over-cautious reject, no blocker cited -> publish (QA backstops)
-            verdict = {**verdict, "summary": "[reject downgraded: no blocker cited] "
-                       + (verdict.get("summary") or "")}
+        decision, verdict = _downgrade_unbacked_reject(verdict)
         rec["critic_decision"] = decision
         rec["critic_summary"] = verdict.get("summary", "") or ""
         if verdict.get("issues"):

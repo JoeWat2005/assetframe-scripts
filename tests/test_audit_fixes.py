@@ -151,6 +151,21 @@ def test_fmt_rr_missing_target_reads_na():
     assert "T1 below 1.0x" in s2 and "T2 n/a" in s2
 
 
+# --------------------------------------------- Phase-4: _downgrade_unbacked_reject (shared sync+batch core)
+def test_downgrade_unbacked_reject():
+    # backed reject (publish_blockers OR blocker-severity issue) -> stays reject, verdict unchanged
+    d, v = RD._downgrade_unbacked_reject({"decision": "reject", "publish_blockers": ["x"], "summary": "s"})
+    assert d == "reject" and v["summary"] == "s"
+    assert RD._downgrade_unbacked_reject({"decision": "reject", "issues": [{"severity": "blocker"}]})[0] == "reject"
+    # unbacked reject -> downgraded to revise, summary annotated in a COPY (original untouched)
+    orig = {"decision": "reject", "summary": "feels weak"}
+    d3, v3 = RD._downgrade_unbacked_reject(orig)
+    assert d3 == "revise" and v3["summary"].startswith("[reject downgraded") and "feels weak" in v3["summary"]
+    assert orig["summary"] == "feels weak"
+    # approve/revise pass through unchanged
+    assert RD._downgrade_unbacked_reject({"decision": "approve", "summary": "ok"}) == ("approve", {"decision": "approve", "summary": "ok"})
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
