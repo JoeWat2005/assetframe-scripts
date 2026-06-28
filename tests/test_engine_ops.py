@@ -196,6 +196,91 @@ class ClaimRequest(unittest.TestCase):
         self.assertIsNone(E.claim_next_request(c))
 
 
+# ------------------------------------------------ RunRecorder lifecycle
+class RunRecorderLifecycle(unittest.TestCase):
+    """db.RunRecorder folds the engine_runs row-lifecycle envelope shared by
+    runner.run_and_record + runner.run_backtest_batch: the 'running' INSERT (+ON CONFLICT
+    reset) and current_run_id claim on start(); the terminal UPDATE + current_run_id clear
+    on finish(). These lock in the EXACT SQL the admin console reads and reap_stale_runs
+    depends on — the FakeConn matches by lowercase substring, exactly as the other DB-SQL
+    tests above do."""
+
+    def test_start_inserts_running_row_and_claims_current_run(self):
+        c = FakeConn()
+        rec = db.RunRecorder(c, "req-7", "manual", {"assets": ["btc"]})
+        self.assertTrue(rec.start())
+        log = c.sql_log()
+        # the run row is INSERTed 'running' with the trigger BOUND as a parameter...
+        self.assertIn("insert into engine_runs", log)
+        self.assertIn("values (%s, %s, %s, 'running', now())", log)
+        # ...and the ON CONFLICT (id) branch RESETS results/errors/log_excerpt/finished_at +
+        # status back to 'running' (a re-run of the same id starts clean).
+        self.assertIn("on conflict (id) do update set trigger = excluded.trigger", log)
+        self.assertIn("results = null, errors = null, log_excerpt = null, finished_at = null", log)
+        # INSERT params: (run_id, trigger, scope_json).
+        ins_sql, ins_params = c.executed[0]
+        self.assertIn("insert into engine_runs", ins_sql.lower())
+        self.assertEqual(ins_params[0], "req-7")
+        self.assertEqual(ins_params[1], "manual")
+        self.assertEqual(json.loads(ins_params[2]), {"assets": ["btc"]})
+        # current_run_id is claimed to the run id (the engine_state singleton).
+        self.assertIn("update engine_state", log)
+        self.assertIn("current_run_id", log)
+        self.assertEqual(c.executed[-1][1], ("req-7",))
+
+    def test_start_backtest_embeds_literal_trigger(self):
+        # run_backtest_batch's form: trigger embedded as a SQL literal (not a bound param), so
+        # 'backtest' must appear IN the INSERT text (a regression guard the batch test relies on).
+        c = FakeConn()
+        rec = db.RunRecorder(c, "backtest-X", "backtest",
+                             {"assets": ["btc"], "days": 2}, trigger_literal=True)
+        self.assertTrue(rec.start())
+        log = c.sql_log()
+        self.assertIn("values (%s, 'backtest', %s, 'running', now())", log)
+        self.assertIn("on conflict (id) do update set trigger = 'backtest'", log)
+        # only (run_id, scope_json) bind — the trigger is a literal, not a param.
+        ins_params = c.executed[0][1]
+        self.assertEqual(len(ins_params), 2)
+        self.assertEqual(ins_params[0], "backtest-X")
+        self.assertEqual(json.loads(ins_params[1]), {"assets": ["btc"], "days": 2})
+
+    def test_finish_records_outcome_and_clears_current_run(self):
+        c = FakeConn()
+        rec = db.RunRecorder(c, "req-7", "manual", {})
+        rec.finish("done", {"generated": 1}, None, "log tail")
+        upd_sql, upd_params = c.executed[0]
+        s = upd_sql.lower()
+        self.assertIn("update engine_runs set status = %s, results = %s, errors = %s,", s)
+        self.assertIn("log_excerpt = %s, finished_at = now() where id = %s", s)
+        # params: (status, results_json, errors, log, run_id).
+        self.assertEqual(upd_params[0], "done")
+        self.assertEqual(json.loads(upd_params[1]), {"generated": 1})
+        self.assertIsNone(upd_params[2])
+        self.assertEqual(upd_params[3], "log tail")
+        self.assertEqual(upd_params[4], "req-7")
+        # current_run_id is cleared (set to None) in the SAME finish() call.
+        self.assertEqual(c.executed[-1][1], (None,))
+        self.assertIn("current_run_id", c.executed[-1][0].lower())
+
+    def test_finish_failed_status_nulls_empty_results(self):
+        c = FakeConn()
+        rec = db.RunRecorder(c, "daily-2026-06-28", "schedule", {})
+        rec.finish("failed", {}, "boom", "trace")
+        upd_params = c.executed[0][1]
+        self.assertEqual(upd_params[0], "failed")
+        self.assertIsNone(upd_params[1])     # an empty results dict serialises to NULL, not '{}'
+        self.assertEqual(upd_params[2], "boom")
+        self.assertEqual(upd_params[4], "daily-2026-06-28")
+
+    def test_start_returns_false_on_db_error(self):
+        # If the very first INSERT can't run (e.g. the table is missing), start() must report
+        # failure WITHOUT raising — the caller (run_and_record / run_backtest_batch) decides how
+        # to bail. The exception text is stashed so run_and_record can surface it.
+        rec = db.RunRecorder(_MissingTableConn(), "req-7", "manual", {})
+        self.assertFalse(rec.start())
+        self.assertTrue(rec.start_error)
+
+
 # ----------------------------------------------- the pause contract
 class PauseContract(unittest.TestCase):
     """Manual requests ignore automation_paused; scheduled runs respect it."""
