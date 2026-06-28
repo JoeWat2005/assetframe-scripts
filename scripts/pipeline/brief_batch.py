@@ -39,6 +39,7 @@ import time
 
 import brief_writer as bw
 import critic as cr
+from anthropic_client import AnthropicBriefClient, resolve_prices
 
 # Web-search tool (same as the synchronous writer). Server-side; runs to completion inside the batch.
 _WEB_TOOL_TYPE = "web_search_20250305"
@@ -78,37 +79,29 @@ def _cid(ticker, id2tk):
     return cid
 
 
-# Standard per-MTok (input, output) USD prices by model family, halved for batch in _telemetry.
-# The critic runs on Haiku, so costing it with brief_writer's Sonnet PRICE_* (the old behaviour)
-# overstated critic cost ~5x. Falls back to brief_writer's configured Sonnet prices.
-_MODEL_PRICES = {"haiku": (1.0, 5.0), "sonnet": (3.0, 15.0), "opus": (15.0, 75.0)}
+# The per-MTok model-family price table + the cost/usage maths now live in anthropic_client (ONE
+# table, ONE formula). _model_prices / _telemetry below are thin delegates so the batch path shares
+# the exact pricing the synchronous author/critic now use — the critic is costed at Haiku, not the
+# old Sonnet over-estimate (~5x). Unknown model ids fall back to brief_writer's env Sonnet prices.
 
 
 def _model_prices(model):
-    m = (model or "").lower()
-    for key, price in _MODEL_PRICES.items():
-        if key in m:
-            return price
-    return (bw.PRICE_IN_PER_MTOK, bw.PRICE_OUT_PER_MTOK)
+    """(price_in, price_out) per MTok for `model` — thin wrapper over anthropic_client.resolve_prices
+    with brief_writer's env-configured Sonnet prices as the unrecognised-model fallback."""
+    return resolve_prices(model, (bw.PRICE_IN_PER_MTOK, bw.PRICE_OUT_PER_MTOK))
 
 
 def _telemetry(message, model):
-    """Per-request token + web-search usage, costed at BATCH (50%) prices with model-appropriate
-    rates. Best-effort: the ledger records the live usage numbers; this drives the manifest's
-    est_cost_usd only. input_tokens is the NON-cache input (same basis as the synchronous writer's
-    telemetry); cache reads/writes are tracked separately and folded into the cost only."""
-    u = getattr(message, "usage", None)
-    tin = getattr(u, "input_tokens", 0) or 0
-    tout = getattr(u, "output_tokens", 0) or 0
-    cr_in = getattr(u, "cache_read_input_tokens", 0) or 0
-    cw_in = getattr(u, "cache_creation_input_tokens", 0) or 0
-    srv = getattr(u, "server_tool_use", None)
-    web = (getattr(srv, "web_search_requests", 0) or 0) if srv else 0
-    p_in, p_out = _model_prices(model)
-    billable_in = tin + 0.1 * cr_in + 1.25 * cw_in           # cache read 0.1x, write 1.25x
-    cost = 0.5 * ((billable_in / 1e6) * p_in + (tout / 1e6) * p_out)   # 0.5 = batch discount
-    return {"model": model, "input_tokens": tin, "output_tokens": tout,
-            "web_searches": web, "cache_read_tokens": cr_in,
+    """Per-request token + web-search usage, costed at BATCH (50%) prices via the shared
+    AnthropicBriefClient.usage()/cost(). Best-effort: the ledger records the live usage numbers; this
+    drives the manifest's est_cost_usd only. input_tokens is the NON-cache input (same basis as the
+    synchronous writer's telemetry); cache reads/writes are tracked separately, folded into cost."""
+    abc = AnthropicBriefClient(None, model, batch=True,
+                               price_fallback=(bw.PRICE_IN_PER_MTOK, bw.PRICE_OUT_PER_MTOK))
+    u = abc.usage(message)
+    cost = abc.cost(u["input"], u["output"], u["cache_read"], u["cache_write"])
+    return {"model": model, "input_tokens": u["input"], "output_tokens": u["output"],
+            "web_searches": u["web_search"], "cache_read_tokens": u["cache_read"],
             "est_cost_usd": round(cost, 4), "batch": True}
 
 

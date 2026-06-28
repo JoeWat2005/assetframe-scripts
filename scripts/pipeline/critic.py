@@ -42,9 +42,12 @@ import os
 import sys
 from pathlib import Path
 
-# Reuse the writer's input loaders + client so the two stay in lock-step.
+# Reuse the writer's input loaders + client factory so the two stay in lock-step. _require_sdk /
+# _client are this module's patch seam (the tests monkeypatch critic._client / critic._require_sdk);
+# review_brief resolves the SDK through them and injects the handle into an AnthropicBriefClient.
 from brief_writer import (_load_json, _require_sdk, _client,
                           summarize_analysis, summarize_research)
+from anthropic_client import AnthropicBriefClient
 
 # The critic runs on Haiku by default: the adversarial review is a structured pass/fail check, not
 # open-ended authoring, so the cheapest + fastest model (with the highest rate-limit ceiling) fits —
@@ -176,53 +179,14 @@ def review_brief(asset, brief, analysis, research, *, model, max_tokens):
     'issues' list on a rich brief) can hit the output ceiling and truncate the JSON mid-object, or a
     smaller/faster model can emit slightly malformed JSON — re-prompting once for a single COMPACT,
     complete object (with extra headroom when it truncated) recovers it cheaply instead of dropping
-    an otherwise-valid brief to needs_brief."""
-    client = _client(_require_sdk())
-    system = [{"type": "text", "text": SYSTEM_PROMPT,   # cached rubric (static across every asset)
-               "cache_control": {"type": "ephemeral"}}]
-    base_user = build_user_message(asset, brief, analysis, research)
-    messages = [{"role": "user", "content": base_user}]
-    in_tok = out_tok = 0
-    verdict = None
-    last_errs = ["unknown error"]
+    an otherwise-valid brief to needs_brief.
 
-    for attempt in (1, 2):
-        try:
-            resp = client.messages.create(model=model, max_tokens=max_tokens, system=system,
-                                          messages=messages)
-        except Exception as ex:
-            print(f"ERROR: Anthropic API call failed: {type(ex).__name__}: {ex}", file=sys.stderr)
-            sys.exit(3)
-        u = getattr(resp, "usage", None)
-        in_tok += getattr(u, "input_tokens", 0) or 0
-        out_tok += getattr(u, "output_tokens", 0) or 0
-
-        verdict, perr = _extract_json(resp.content)
-        errs = [perr] if perr else _verdict_errors(verdict)
-        if not errs:
-            break
-        last_errs = errs
-        if attempt == 1:
-            # If the output hit the ceiling, the JSON was cut off — bump the budget. Always ask for a
-            # single compact, complete object so the verdict closes.
-            if getattr(resp, "stop_reason", None) == "max_tokens":
-                max_tokens = max(max_tokens, 8000)
-            messages = [{"role": "user", "content": base_user + "\n\nReturn ONLY a single, "
-                         "COMPLETE, compact JSON verdict object — no prose, no markdown fences. Keep "
-                         "the 'issues' list concise (the most important items) so the JSON closes."}]
-            continue
-        print("ERROR: critic produced an invalid verdict:\n  - " + "\n  - ".join(last_errs),
-              file=sys.stderr)
-        sys.exit(3)
-
-    # defensive coherence: an approve must not carry publish blockers
-    if verdict["decision"] == "approve" and verdict.get("publish_blockers"):
-        verdict["decision"] = "revise"
-        verdict.setdefault("summary", "")
-        verdict["summary"] += " [downgraded approve->revise: publish_blockers were present]"
-
-    telemetry = {"model": model, "input_tokens": in_tok, "output_tokens": out_tok}
-    return verdict, telemetry
+    Resolves the SDK through THIS module's _client/_require_sdk (the patch seam) and INJECTS the
+    handle into an AnthropicBriefClient, which owns the call/usage/cost + the retry flow. The
+    returned telemetry now carries a model-aware est_cost_usd (the critic runs on Haiku, so it is
+    finally costed at Haiku — not Sonnet — rates)."""
+    abc = AnthropicBriefClient(_client(_require_sdk()), model, default_max_tokens=max_tokens)
+    return abc.critique(asset, brief, analysis, research, max_tokens=max_tokens)
 
 
 def parse_args(argv):

@@ -64,6 +64,10 @@ PRICE_OUT_PER_MTOK = float(os.environ.get("ANTHROPIC_PRICE_OUT", "15.0"))
 from brief_schema import (validate_brief, PREDICTION_TYPES, DIRECTIONS, SETUP_SIDES, HORIZONS,
                           ASSET_CLASS_KEYS, RISK_LEVELS, QUALITY, CLAIM_STATUSES)  # noqa: F401
 
+# The Anthropic call + token-usage + cost triad lives in one place now. author_brief INJECTS the
+# module-resolved SDK client (via _client/_require_sdk below — the patch seam) into this class.
+from anthropic_client import AnthropicBriefClient, resolve_prices
+
 
 # =====================================================================
 # Input loading + market-context compaction
@@ -385,7 +389,10 @@ def _extract_json(blocks):
 
 
 def _usage_line(model, usage_in, usage_out, web_searches, attempts):
-    cost = (usage_in / 1e6) * PRICE_IN_PER_MTOK + (usage_out / 1e6) * PRICE_OUT_PER_MTOK
+    # Model-aware pricing (was Sonnet-fixed): resolve the per-MTok rate by model family, falling
+    # back to the env-configurable PRICE_* (default Sonnet) for an unrecognised model id.
+    p_in, p_out = resolve_prices(model, (PRICE_IN_PER_MTOK, PRICE_OUT_PER_MTOK))
+    cost = (usage_in / 1e6) * p_in + (usage_out / 1e6) * p_out
     return (f"brief_writer: model={model} attempts={attempts} "
             f"in_tok={usage_in} out_tok={usage_out} web_searches={web_searches} "
             f"est_cost_usd=${cost:.4f}")
@@ -417,91 +424,16 @@ def author_brief(ticker, analysis, memory_pack, research, social, *, model,
     """Call the model (with web_search), parse + validate, RE-PROMPT ONCE on a
     validation miss. Returns (brief, telemetry). Raises SystemExit on hard failure.
     include_news=False (per-asset) is technical-focus: a smaller web_search budget + a directive
-    to keep news/catalyst research minimal."""
-    anthropic = _require_sdk()
-    client = _client(anthropic)
+    to keep news/catalyst research minimal.
 
-    web_uses, sys_suffix = _news_settings(include_news)
-    # Prompt caching: the SYSTEM_PROMPT (the SKILL.md authoring rules) is large (~1.3k tok) and
-    # IDENTICAL across every asset + across each pause_turn resume / repair turn within one asset.
-    # Marking it as an ephemeral cache breakpoint means the first call writes it (1.25x) and every
-    # subsequent call this run reads it at 0.1x — cutting input cost ~90% on the rules block and
-    # collapsing the per-minute token load that the multi-turn web_search loop used to re-send in
-    # full. 5-min TTL, refreshed on every hit, so a back-to-back asset run stays warm.
-    system = [{"type": "text", "text": SYSTEM_PROMPT + sys_suffix,
-               "cache_control": {"type": "ephemeral"}}]
-    user = build_user_message(ticker, analysis, memory_pack, research, social, guidance)
-    messages = [{"role": "user", "content": user}]
-    tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": web_uses}]
-
-    tot_in = tot_out = tot_web = 0
-    last_err = None
-
-    def _acc(r):                          # accumulate token + web-search usage across calls
-        nonlocal tot_in, tot_out, tot_web
-        u = getattr(r, "usage", None)
-        tot_in += getattr(u, "input_tokens", 0) or 0
-        tot_out += getattr(u, "output_tokens", 0) or 0
-        srv = getattr(u, "server_tool_use", None)
-        tot_web += (getattr(srv, "web_search_requests", 0) or 0) if srv else 0
-
-    def _call():
-        try:
-            return client.messages.create(model=model, max_tokens=max_tokens, system=system,
-                                          tools=tools, messages=messages)
-        except Exception as ex:           # network / auth / rate limit
-            print(f"ERROR: Anthropic API call failed: {type(ex).__name__}: {ex}", file=sys.stderr)
-            sys.exit(3)
-
-    # attempt 1 = author; attempt 2 = repair with the validation errors fed back.
-    for attempt in (1, 2):
-        resp = _call()
-        _acc(resp)
-        # The server-side web_search tool can PAUSE the turn when its internal tool loop hits the
-        # iteration cap: the API returns stop_reason=='pause_turn' with the partial turn and NO
-        # finished JSON. RESUME the same turn by re-sending the conversation with the model's
-        # partial content appended (this is NOT a validation repair — no new user message). The
-        # research-heavy briefs this feature exists for are exactly the ones that pause, so
-        # without resuming they spuriously fail the schema gate and degrade the asset to
-        # needs_brief with a misleading "could not parse JSON". Bounded so a loop can't run away.
-        resumes = 0
-        while getattr(resp, "stop_reason", None) == "pause_turn" and resumes < 5:
-            resumes += 1
-            messages.append({"role": "assistant", "content": resp.content})
-            resp = _call()
-            _acc(resp)
-
-        brief, perr = _extract_json(resp.content)
-        errs = [perr] if perr else validate_brief(brief)
-        if errs and getattr(resp, "stop_reason", None) == "max_tokens":
-            # Output hit the token ceiling, so the JSON was cut off. Name the real cause
-            # instead of a downstream "could not parse JSON" guess (still re-prompts once).
-            errs = [f"model hit max_tokens={max_tokens} (output truncated before the JSON "
-                    f"closed); raise --max-tokens"] + errs
-        telemetry = {"model": model, "input_tokens": tot_in, "output_tokens": tot_out,
-                     "web_searches": tot_web, "attempts": attempt,
-                     "est_cost_usd": round((tot_in / 1e6) * PRICE_IN_PER_MTOK
-                                           + (tot_out / 1e6) * PRICE_OUT_PER_MTOK, 4)}
-        if not errs:
-            return brief, telemetry
-
-        last_err = errs
-        if attempt == 1:
-            # Re-prompt once: keep the model's own draft in the thread and ask it to
-            # return a corrected COMPLETE object addressing the listed errors.
-            messages.append({"role": "assistant", "content": resp.content})
-            messages.append({"role": "user", "content":
-                             "Your brief failed schema validation with these errors:\n- "
-                             + "\n- ".join(errs)
-                             + "\n\nReturn the COMPLETE corrected brief as a single JSON "
-                             "object (no prose, no fences). Fix every error and keep all "
-                             "other fields. Do not author prices or pad confidence."})
-
-    # still invalid after the repair attempt
-    print("ERROR: brief failed schema validation after re-prompt:\n  - "
-          + "\n  - ".join(last_err or ["unknown error"]), file=sys.stderr)
-    print(_usage_line(model, tot_in, tot_out, tot_web, 2), file=sys.stderr)
-    sys.exit(2)
+    Resolves the SDK through this module's _client/_require_sdk (the patch seam) and INJECTS the
+    handle into an AnthropicBriefClient, which owns the call/usage/cost + pause_turn/repair flow.
+    Prompt caching note: the (identical) SYSTEM_PROMPT carries an ephemeral cache breakpoint, so the
+    rules block is written once (1.25x) and read at 0.1x across every resume/repair turn this run."""
+    abc = AnthropicBriefClient(_client(_require_sdk()), model, default_max_tokens=max_tokens,
+                               price_fallback=(PRICE_IN_PER_MTOK, PRICE_OUT_PER_MTOK))
+    return abc.author(ticker, analysis, memory_pack, research, social,
+                      guidance=guidance, include_news=include_news, max_tokens=max_tokens)
 
 
 # =====================================================================
