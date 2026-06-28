@@ -8,7 +8,7 @@ Documentation=https://github.com/JoeWat2005/assetframe-scripts
 # publishes by ~06:00 UTC = ~07:00 UK — the pre-LSE-open morning slot. OnCalendar is in the timer's
 # timezone; pin it to UTC so it is independent of VM local time (set the VM to UTC anyway).
 OnCalendar=*-*-* 04:00:00 UTC
-# If the VM was asleep/off at 05:00 (or rebooted past it), run as soon as it can.
+# If the VM was asleep/off at 04:00 (or rebooted past it), run as soon as it can.
 Persistent=true
 # Small jitter so we are not hammering data providers at the exact top of the minute.
 RandomizedDelaySec=120

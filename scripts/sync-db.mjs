@@ -120,6 +120,12 @@ async function syncOne(label, url) {
       // (the existing period edition stands) rather than failing the whole sync.
       if (/report_id/i.test(err.message || "") && /duplicate|unique/i.test(err.message || "")) {
         console.warn(`  [${label}] edition ${id} skipped — its period report_id is already taken (re-run).`);
+      } else if (/column .* does not exist/i.test(err.message || "")) {
+        // A missing column = this branch's migrations LAG the engine (deploy skew). Warn + skip rather
+        // than failing the WHOLE sync (which would mark an otherwise-good PROD publish 'failed' when a
+        // DEV branch lags) — the edition syncs once the migration runs. Mirrors the provenance-UPDATE
+        // and scored_results lag-tolerance below.
+        console.warn(`  [${label}] edition ${id} skipped — a column is missing (migrations lag this branch); syncs once migrated.`);
       } else {
         editionFailures++;
         console.error(`  [${label}] edition ${id} FAILED: ${err.message}`);

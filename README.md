@@ -58,11 +58,13 @@ The append‑only `ledger/outcome_ledger.csv` is the tracked source of truth.
 ## Tests
 
 ```bash
-for t in scripts/test_*.py; do python "$t"; done                 # bash / CI
+python -m pytest tests/ -q        # bash / CI (matches .github/workflows/ci.yml)
 ```
 ```powershell
-Get-ChildItem scripts\test_*.py | ForEach-Object { python $_.FullName }   # PowerShell
+python -m pytest tests/ -q        # PowerShell
 ```
+Tests live in `tests/` (run from the repo root); `tests/conftest.py` applies the subpackage
+`sys.path` shim, so the relocated modules' flat imports resolve under pytest.
 
 The full report pipeline is documented in `.claude/skills/mvp/SKILL.md`. Decision‑support only —
 not regulated financial advice; **no auto‑trading; no auto‑publish** (a human approval gate gates

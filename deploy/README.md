@@ -21,7 +21,7 @@ Two processes do the work, both via `scripts/coordination/engine_ops.py` (the sh
   the oldest queued `generation_requests` row → run it (`trigger='manual'`). **Manual
   requests run even when `automation_paused` is true** — enqueuing is an explicit admin
   action.
-- **`scripts/scheduler/service/scheduled_run.py`** — systemd **oneshot**, fired by a **timer at 05:00 UTC**.
+- **`scripts/scheduler/service/scheduled_run.py`** — systemd **oneshot**, fired by a **timer at 04:00 UTC**.
   Heartbeat → if `automation_paused`, log + record a skip + exit 0; else run the full due
   batch (`trigger='schedule'`, scope `{all_due:true}` → `run_daily.py --mode production`).
 
@@ -57,7 +57,7 @@ sudo apt-get install -y python3.12 python3.12-venv python3-pip git tzdata curl
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt-get install -y nodejs
 
-# Pin the VM clock to UTC so the 05:00 UTC timer is unambiguous.
+# Pin the VM clock to UTC so the 04:00 UTC timer is unambiguous.
 sudo timedatectl set-timezone UTC
 ```
 
@@ -194,7 +194,7 @@ sudo systemctl enable --now assetframe-poller.service assetframe-daily.timer
 systemctl status assetframe-poller.service
 journalctl -u assetframe-poller -f          # watch live ticks
 
-# The timer should be scheduled with a next-run at the upcoming 05:00 UTC.
+# The timer should be scheduled with a next-run at the upcoming 04:00 UTC.
 systemctl list-timers assetframe-daily.timer
 
 # Optional: fire a scheduled run right now to prove the path end-to-end.
@@ -210,7 +210,7 @@ scoped run from the console and watch the poller claim it (`journalctl -u assetf
 ## Operating notes
 
 - **Pause/resume automation** from the web app — it sets `engine_state.automation_paused`.
-  The 05:00 timer respects it (logs "automation paused, skipping" and records a skip row).
+  The 04:00 timer respects it (logs "automation paused, skipping" and records a skip row).
   **Manual console requests still run while paused** — that is intentional.
 - **Cancel a run** from the console — it sets `cancel_requested`; an in-flight run polls it
   (~every 5s) and terminates → status `cancelled`.
