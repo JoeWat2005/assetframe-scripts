@@ -27,7 +27,7 @@ what scaffold_payload.py consumes, and is unit-tested against the real briefs in
 data/briefs/ so it can never silently drift from the schema.
 
 Usage:
-  python scripts/brief_writer.py <TICKER> --analysis <path> --memory-pack <path> \
+  python -m scripts.pipeline.authoring.brief_writer <TICKER> --analysis <path> --memory-pack <path> \
       [--research <path>] [--social <path>] --out <path> \
       [--model <id>] [--max-tokens N] [--guidance "critic issues ..."]
 

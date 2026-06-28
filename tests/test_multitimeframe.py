@@ -2,7 +2,7 @@
 horizon-tagged track report_ids that keep the ticker (last '-' segment) and year (leading digits)
 parseable by every downstream consumer (the scorer, sync-db, editions).
 
-Offline, stdlib only.  Run:  python scripts/test_multitimeframe.py
+Offline, stdlib only.  Run:  python -m pytest tests/test_multitimeframe.py
 """
 import os
 import sys

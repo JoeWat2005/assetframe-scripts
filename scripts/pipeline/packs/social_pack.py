@@ -37,7 +37,7 @@ Schema:
 }
 
 Usage:
-  python scripts/social_pack.py <NAME> [--in <draft.json>]
+  python -m scripts.pipeline.packs.social_pack <NAME> [--in <draft.json>]
          [--out data/social/<NAME>_social_pack.json] [--print]
 
 Exit codes: 0 ok / 2 validation error (bad platform / sentiment / risk value).
@@ -171,7 +171,7 @@ def parse_args(argv):
 
 def main():
     if len(sys.argv) < 2:
-        print("usage: python scripts/social_pack.py <NAME> [--in draft.json] "
+        print("usage: python -m scripts.pipeline.packs.social_pack <NAME> [--in draft.json] "
               "[--out path] [--print]  (entirely optional — pipeline runs without it)")
         sys.exit(2)
     name = sys.argv[1]

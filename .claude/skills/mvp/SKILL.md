@@ -35,16 +35,16 @@ Use Research view / Long-biased scenario / Short-biased scenario / Conditional s
 ## The V2 flow (per instrument)
 
 ```
-score_report.py (score expired windows FIRST)
-  -> intraday.py [--anchor live|prior-completed|friday]
-  -> research_pack.py
-  -> social_pack.py            (OPTIONAL — pipeline runs without it)
-  -> ledger_context.py
+scripts/pipeline/scoring/score_report.py (score expired windows FIRST)
+  -> scripts/pipeline/marketdata/intraday.py [--anchor live|prior-completed|friday]
+  -> scripts/pipeline/packs/research_pack.py
+  -> scripts/pipeline/packs/social_pack.py   (OPTIONAL — pipeline runs without it)
+  -> scripts/analytics/memory/ledger_context.py
   -> AI writes data/briefs/<NAME>_research_brief.json   (the ONLY hand-authored artifact)
-  -> scaffold_payload.py       (compiles payload + predictions; invokes confidence.py; rejects unsupported numbers/claims)
-  -> mvp_report.py             (QA gate; aborts on error)
+  -> scripts/pipeline/scoring/scaffold_payload.py   (compiles payload + predictions; invokes scripts/pipeline/scoring/confidence.py; rejects unsupported numbers/claims)
+  -> scripts/pipeline/render/mvp_report.py   (QA gate; aborts on error)
   -> HUMAN REVIEW
-  -> publish.py / export_content.py / sync-db
+  -> scripts/delivery/publish.py / scripts/delivery/export_content.py / sync-db
 ```
 
 Engine artifacts (`data/analysis/`, `data/research/`, `data/social/`, `data/ledger_context/`, `data/briefs/`, `data/payloads/`, `data/predictions/`) stay gitignored; only `web/content/*.json` + the new JSON DB columns reach git/Neon.
@@ -54,7 +54,7 @@ Engine artifacts (`data/analysis/`, `data/research/`, `data/social/`, `data/ledg
 Same as advisor Step 1.5. Check `data/predictions/*_predictions.json` (and any `agent-advice/exports/tables/*_predictions.json`) for a passed `window_end_utc` with no matching `ledger/outcome_ledger.csv` row; refresh that instrument's hourly CSV; resolve `manual` predictions via WebSearch (leave genuinely unresolvable ones MANUAL with a stated reason); run:
 
 ```
-python scripts/score_report.py <predictions.json> [--hourly <csv>] [--manual P5=Y[,P6=NT]] [--dry-run] [--force]
+python -m scripts.pipeline.scoring.score_report <predictions.json> [--hourly <csv>] [--manual P5=Y[,P6=NT]] [--dry-run] [--force]
 ```
 
 Verdicts are Y / N / NT / MANUAL; hit rate counts Y / (Y + N). The ledger is **append-only** — never edit or reorder rows, never score an incomplete window (`--force` only for a deliberate PARTIAL or an early-close CSV). The first 13 columns are the original schema; V2 added **additive trailing columns** `conf_version, conf_raw, asset_class, pred_type, direction, horizon, market_regime` (older rows just read these back as `""`). The calibration block appears at ≥10 rows (buckets `<=60` / `61-75` / `>75`). Doing this first is what keeps `ledger_context` and `research_memory` provably free of look-ahead.
@@ -62,7 +62,7 @@ Verdicts are Y / N / NT / MANUAL; hit rate counts Y / (Y + N). The ledger is **a
 After scoring, regenerate the calibration map so the latest outcomes inform confidence:
 
 ```
-python scripts/calibrate.py [--ledger ledger/outcome_ledger.csv] [--out ledger/calibration_map.json] [--dry-run]
+python -m scripts.analytics.store.calibrate [--ledger ledger/outcome_ledger.csv] [--out ledger/calibration_map.json] [--dry-run]
 ```
 
 `calibrate.py` fits a weighted isotonic regression of realized hit-rate on the ledger's `conf_raw` (the pre-calibration capped score; falls back to `confidence` for legacy rows), filtered to the current `conf_version`, then **shrinks toward identity** with `w = min(1, n_rows / 40)`. So below ~10 rows the map is essentially identity (published == raw) — it earns its adjustment only as the ledger fills. Exit 0 always; an empty/young ledger writes a valid identity map.
@@ -70,7 +70,7 @@ python scripts/calibrate.py [--ledger ledger/outcome_ledger.csv] [--out ledger/c
 ### 2. Run the engine (with the right anchor)
 
 ```
-python scripts/intraday.py <YAHOO_SYMBOL> --name <PREFIX> --hrange 10d --related "..." [--anchor live|prior-completed|friday]
+python -m scripts.pipeline.marketdata.intraday <YAHOO_SYMBOL> --name <PREFIX> --hrange 10d --related "..." [--anchor live|prior-completed|friday]
 ```
 
 `--anchor` re-derives floor pivots + ATR day-bands on a **chosen completed daily session** instead of the live/in-progress one — this **replaces the old hand-built `*_anchored.json`**:
@@ -83,7 +83,7 @@ When `--anchor` != `live`, `pivots_classic` / `atr_day_bands` are OVERWRITTEN wi
 ### 3. Build the research pack (sourcing layer)
 
 ```
-python scripts/research_pack.py <NAME> [...]    # see the script's --help
+python -m scripts.pipeline.packs.research_pack <NAME> [...]    # see the script's --help
 ```
 
 Role: gather and **source** the factual context into `data/research/<NAME>_research_pack.json` — macro news, asset-specific news, earnings/events, economic calendar with exact UK times, regulatory + geopolitical context — each item carrying a source URL, timestamp, and source-quality note, plus a `source_gaps[]` list. Built from WebSearch/WebFetch + official calendars (official sources first). **Rule:** the AI may *interpret* news but never invent it; every factual claim in your brief must trace to a source in this pack, and the QA gate fails unsupported high-impact claims. The pack is what `scaffold_payload.py` and `confidence.py` check the brief's `claims[]` against. (Script is new per the V2 plan — confirm the exact CLI with `--help`.)
@@ -91,7 +91,7 @@ Role: gather and **source** the factual context into `data/research/<NAME>_resea
 ### 4. Build the social pack (OPTIONAL, subtract-only)
 
 ```
-python scripts/social_pack.py <NAME> [...]      # OPTIONAL; see the script's --help
+python -m scripts.pipeline.packs.social_pack <NAME> [...]      # OPTIONAL; see the script's --help
 ```
 
 Role: summarise the *market conversation* into `data/social/<NAME>_social_pack.json` — sentiment summaries, crowding indicators, notable discussions, emerging narratives, source references, a signal-quality score, and explicit hype/manipulation warnings (the `aggregate` block carries `hype_risk`, `crowding_risk`, `contrarian_warning`, which the confidence engine reads). Sourced via the `last30days` skill (Reddit/HN/Polymarket keyless) + WebSearch.
@@ -101,7 +101,7 @@ Role: summarise the *market conversation* into `data/social/<NAME>_social_pack.j
 ### 5. Build the ledger context (ledger as INPUT)
 
 ```
-python scripts/ledger_context.py <NAME> [--ticker T] [--asset-class equity] [--as-of "YYYY-MM-DD HH:MM"] [--recent-k 8] [--print]
+python -m scripts.analytics.memory.ledger_context <NAME> [--ticker T] [--asset-class equity] [--as-of "YYYY-MM-DD HH:MM"] [--recent-k 8] [--print]
 ```
 
 Writes `data/ledger_context/<NAME>_ledger_context.json`: instrument hit rate, asset-class hit rate, prediction-type hit rates + counts, recent streaks, recent drift, similar-setup history, known success/failure patterns, and `notes_for_ai[]`. **Hard rule — no look-ahead:** it aggregates ONLY rows whose `window_end_utc` is strictly before `--as-of` (default: now). It degrades gracefully — an empty or young ledger yields a valid "no history yet" (neutral) context, so day-one runs work. You receive this BEFORE writing the brief and may adjust conviction, scenario/catalyst weighting, or setup preference from history — e.g. "similar upside breakouts here recently underperformed → keep the thesis, cut conviction." The same file feeds `confidence.ledger_confidence`. (Future: `research_memory.py` derives `ledger/research_memory.json` — thesis themes, catalyst types, regimes, reasoning patterns vs outcome quality — surfaced through `ledger_context.py` under the same no-look-ahead rule; see that script's `--help` when it lands.)
@@ -115,7 +115,7 @@ When you write it, you have in front of you: the engine analysis, the research p
 ### 7. Compile the payload + predictions (scaffold)
 
 ```
-python scripts/scaffold_payload.py <NAME> \
+python -m scripts.pipeline.scoring.scaffold_payload <NAME> \
   [--analysis data/analysis/<NAME>_analysis.json] \
   [--brief data/briefs/<NAME>_research_brief.json] \
   [--research data/research/<NAME>_research_pack.json] \
@@ -167,7 +167,7 @@ Every report's primary prediction is tagged with a `prediction_type` ∈ **break
 ### 10. Generate the reports + QA gate (build aborts on failure)
 
 ```
-python scripts/mvp_report.py <payload.json|out_dir> [...]    # see the script's --help
+python -m scripts.pipeline.render.mvp_report <payload.json|out_dir> [...]    # see the script's --help
 ```
 
 `mvp_report.py` renders the **Snapshot** (free) and **Pro** PDFs + HTML + `metadata.json` + `preview.png`, and runs the QA gate. Most V2 identity checks now pass **by construction** (the scaffold built them) but remain as regression guards: price triple-equality, levels↔setups↔ladder↔ledger identity, R:R lint, banned-language scan, free/pro split, timestamps UTC-normalized, no lookahead, session fields present, logo present. **V2-specific QA:** brief `claims[]` must trace to the research pack (unsupported high-impact → fail via `THESIS_BLOCKED`); social must be labelled "market conversation," not fact; `primary_prediction.type` ∈ the taxonomy enum; predictions reference only canonical ids. The Pro confidence gauge + scorecard consume the computed confidence breakdown (component table + caps applied + calibration note).
@@ -181,7 +181,7 @@ Report contents are unchanged from v1.x:
 A report is **never published straight from the generator.** After QA passes, do a visual + editorial inspection — Read `free.pdf`, `pro.pdf`, `preview.png` (spot-check the HTML) page by page against: logo present, no placeholder branding, no overlap/clipping/cramping, separate status & risk badges, no annotation collisions, simple Free chart, ladder present in Pro and matching the tables, readable audit + setups, unambiguous R:R, warmed indicators, session rules applied, options context omitted where unsupported, claims gated, confidence explanation matches the computed score, correct paths — then stamp:
 
 ```
-python scripts/mvp_report.py <out_dir> --stamp-visual
+python -m scripts.pipeline.render.mvp_report <out_dir> --stamp-visual
 ```
 
 A human reviewer signs off before anything goes to the website. This is the final gate in the agentic system: AI drafts, Python validates, a human approves.
@@ -191,8 +191,8 @@ A human reviewer signs off before anything goes to the website. This is the fina
 Follow the existing AssetFrame publish workflow (see `mvp/CLAUDE.md` and the publish memory): export the report content to `web/content/`, upload report files to private R2, then sync the database. Typical order:
 
 ```
-python scripts/export_content.py [...]        # -> web/content/*.json (track record, editions); see --help
-python scripts/publish.py [--date YYYY-MM-DD] [--dry-run]   # upload free + Pro files to private R2 (auto-loads web/.env.local)
+python -m scripts.delivery.export_content [...]        # -> web/content/*.json (track record, editions); see --help
+python -m scripts.delivery.publish [--date YYYY-MM-DD] [--dry-run]   # upload free + Pro files to private R2 (auto-loads web/.env.local)
 node web/scripts/sync-db.mjs                   # idempotent DELETE + re-insert of scored_results; apply to BOTH Neon branches
 ```
 
@@ -254,7 +254,7 @@ IPO/debut, market-cap, index inclusion/exclusion, central-bank probabilities, ge
 
 ## Shared infrastructure
 
-`scripts/intraday.py` (warm-up-extended data, `windows` block, `--anchor`, shared `compute_pivots_bands()`) · `scripts/taxonomy.py` (the one prediction vocabulary + validators) · `scripts/research_pack.py` (sourced factual context) · `scripts/social_pack.py` (optional market-conversation signal) · `scripts/ledger_context.py` (ledger-as-input, no look-ahead) · `scripts/scaffold_payload.py` (payload + predictions compiler/validator) · `scripts/confidence.py` (deterministic confidence) · `scripts/calibrate.py` (isotonic calibration map) · `scripts/report_pdf.py` (charts with warm-crop + partial-indicator disclosure) · `scripts/sessions.py` (session profiles + window policy) · `scripts/mvp_report.py` (generator + QA gate + `--stamp-visual`) · `scripts/score_report.py` (append-only ledger with additive taxonomy/conf columns, `--manual`, `--dry-run`, calibration) · `scripts/research_memory.py` (reasoning-level learning; future) · `scripts/social_posts.py` (safe-worded distribution drafts, no auto-posting; future) · `scripts/publish.py` / `export_content.py` / `web/scripts/sync-db.mjs` (publish workflow). Warm-up minimums: daily 1y display ← 2y fetch; hourly 10d display ← 31d fetch; partial lines hidden or labelled; never infer trend from cold indicators. Where a flag is uncertain, run the script's `--help`.
+`scripts/pipeline/marketdata/intraday.py` (warm-up-extended data, `windows` block, `--anchor`, shared `compute_pivots_bands()`) · `scripts/pipeline/scoring/taxonomy.py` (the one prediction vocabulary + validators) · `scripts/pipeline/packs/research_pack.py` (sourced factual context) · `scripts/pipeline/packs/social_pack.py` (optional market-conversation signal) · `scripts/analytics/memory/ledger_context.py` (ledger-as-input, no look-ahead) · `scripts/pipeline/scoring/scaffold_payload.py` (payload + predictions compiler/validator) · `scripts/pipeline/scoring/confidence.py` (deterministic confidence) · `scripts/analytics/store/calibrate.py` (isotonic calibration map) · `scripts/pipeline/render/report_pdf.py` (charts with warm-crop + partial-indicator disclosure) · `scripts/scheduler/calendars/sessions.py` (session profiles + window policy) · `scripts/pipeline/render/mvp_report.py` (generator + QA gate + `--stamp-visual`) · `scripts/pipeline/scoring/score_report.py` (append-only ledger with additive taxonomy/conf columns, `--manual`, `--dry-run`, calibration) · `scripts/analytics/memory/research_memory.py` (reasoning-level learning; future) · `scripts/pipeline/packs/social_posts.py` (safe-worded distribution drafts, no auto-posting; future) · `scripts/delivery/publish.py` / `scripts/delivery/export_content.py` / `web/scripts/sync-db.mjs` (publish workflow). Warm-up minimums: daily 1y display ← 2y fetch; hourly 10d display ← 31d fetch; partial lines hidden or labelled; never infer trend from cold indicators. Where a flag is uncertain, run the script's `--help`.
 
 ## Changelog
 

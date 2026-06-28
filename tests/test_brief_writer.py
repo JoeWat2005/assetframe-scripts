@@ -7,7 +7,7 @@ cases it must REJECT, and the no-network helpers (analysis compaction, prompt bu
 
 No Anthropic API calls — the live authoring path is exercised by the user.
 
-Run:  python scripts/test_brief_writer.py
+Run:  python -m pytest tests/test_brief_writer.py
 """
 import copy
 import json

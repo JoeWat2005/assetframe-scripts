@@ -1,7 +1,7 @@
 """Tests for taxonomy.py — validators reject typos, helpers map correctly, and the
 confidence band/bucket boundaries are exact. Pure stdlib unittest.
 
-Run:  python scripts/test_taxonomy.py
+Run:  python -m pytest tests/test_taxonomy.py
 """
 import os
 import sys

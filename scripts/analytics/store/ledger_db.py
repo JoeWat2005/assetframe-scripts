@@ -18,9 +18,9 @@ Design guarantees (why this is safe):
     crashes the rebuild.
 
 CLI:
-  python scripts/ledger_db.py rebuild                 # (re)build the mirror from the CSV
-  python scripts/ledger_db.py stats                   # quick row/instrument summary
-  python scripts/ledger_db.py query "SELECT ..."      # run read-only SQL, print rows as JSON
+  python -m scripts.analytics.store.ledger_db rebuild                 # (re)build the mirror from the CSV
+  python -m scripts.analytics.store.ledger_db stats                   # quick row/instrument summary
+  python -m scripts.analytics.store.ledger_db query "SELECT ..."      # run read-only SQL, print rows as JSON
 """
 import csv
 import json

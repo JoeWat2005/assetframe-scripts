@@ -1,7 +1,7 @@
 # AssetFrame OCI engine runner — bring-up runbook
 
 This directory holds the VM-side counterpart to the admin **Engine console** in the web
-app. The Oracle Cloud (OCI) VM runs the AssetFrame engine (`scripts/run_daily.py`) on a
+app. The Oracle Cloud (OCI) VM runs the AssetFrame engine (`scripts/scheduler/run/run_daily.py`) on a
 schedule **and** on demand, and reports status back to the web app.
 
 ## How it talks to the web app (no inbound ports)
@@ -15,13 +15,13 @@ web app **only through three Neon tables**, all over **outbound** Postgres/HTTPS
 | `engine_runs` | inserts one row per run; updates status/results/log | reads for live run status + history |
 | `engine_state` (singleton id=1) | heartbeats `last_heartbeat_at`, sets `current_run_id` | reads heartbeat ("online?"), sets `automation_paused` |
 
-Two processes do the work, both via `scripts/engine_ops.py` (the shared DB + run layer):
+Two processes do the work, both via `scripts/coordination/engine_ops.py` (the shared DB + run layer):
 
-- **`scripts/poller.py`** — long-lived systemd **service**. Every 30s: heartbeat → claim
+- **`scripts/scheduler/service/poller.py`** — long-lived systemd **service**. Every 30s: heartbeat → claim
   the oldest queued `generation_requests` row → run it (`trigger='manual'`). **Manual
   requests run even when `automation_paused` is true** — enqueuing is an explicit admin
   action.
-- **`scripts/scheduled_run.py`** — systemd **oneshot**, fired by a **timer at 05:00 UTC**.
+- **`scripts/scheduler/service/scheduled_run.py`** — systemd **oneshot**, fired by a **timer at 05:00 UTC**.
   Heartbeat → if `automation_paused`, log + record a skip + exit 0; else run the full due
   batch (`trigger='schedule'`, scope `{all_due:true}` → `run_daily.py --mode production`).
 

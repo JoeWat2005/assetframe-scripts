@@ -4,7 +4,7 @@ Temp-dir only: monkeypatches run_daily.ROOT so it never touches the real box. As
 reports/ + runs/ edition folders are pruned past the window, recent ones and non-dated folders
 are kept, and the ledger / config / data working files are never touched.
 
-Run:  python scripts/test_retention.py
+Run:  python -m pytest tests/test_retention.py
 """
 import os
 import sys

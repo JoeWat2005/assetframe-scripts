@@ -4,7 +4,7 @@ Offline + temp-dir only: never touches the real ledger. Asserts the mirror faith
 reflects the CSV, is idempotent (rebuild == rebuild), coerces numerics, and never mutates
 the source CSV.
 
-Run:  python scripts/test_ledger_db.py
+Run:  python -m pytest tests/test_ledger_db.py
 """
 import csv
 import os

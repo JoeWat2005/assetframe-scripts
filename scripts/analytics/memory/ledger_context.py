@@ -16,7 +16,7 @@ columns (asset_class, pred_type, direction, ...) added by score_report.py; older
 rows that lack them still count toward the instrument/overall hit rate.
 
 Usage:
-  python scripts/ledger_context.py <NAME> [--ticker T] [--asset-class equity]
+  python -m scripts.analytics.memory.ledger_context <NAME> [--ticker T] [--asset-class equity]
          [--ledger ledger/outcome_ledger.csv] [--as-of "YYYY-MM-DD HH:MM"]
          [--recent-k 8] [--out data/ledger_context/<NAME>_ledger_context.json]
          [--print]
@@ -189,7 +189,7 @@ def parse_args(argv):
 
 def main():
     if len(sys.argv) < 2:
-        print("usage: python scripts/ledger_context.py <NAME> [--ticker T] "
+        print("usage: python -m scripts.analytics.memory.ledger_context <NAME> [--ticker T] "
               "[--asset-class equity] [--as-of 'YYYY-MM-DD HH:MM'] [--out path] [--print]")
         sys.exit(2)
     name = sys.argv[1]

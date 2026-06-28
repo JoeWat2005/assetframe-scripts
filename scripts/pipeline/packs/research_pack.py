@@ -29,7 +29,7 @@ Schema:
 }
 
 Usage:
-  python scripts/research_pack.py <NAME> [--in <draft.json>]
+  python -m scripts.pipeline.packs.research_pack <NAME> [--in <draft.json>]
          [--out data/research/<NAME>_research_pack.json] [--print]
 
 Exit codes: 0 ok / 2 validation error (unsupported thesis claim, bad category...).
@@ -161,7 +161,7 @@ def parse_args(argv):
 
 def main():
     if len(sys.argv) < 2:
-        print("usage: python scripts/research_pack.py <NAME> [--in draft.json] "
+        print("usage: python -m scripts.pipeline.packs.research_pack <NAME> [--in draft.json] "
               "[--out path] [--print]")
         sys.exit(2)
     name = sys.argv[1]

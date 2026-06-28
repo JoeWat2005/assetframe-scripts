@@ -3,7 +3,7 @@ price is a canonical level value), the claim-sourcing THESIS_BLOCKED gate, the
 free/pro split guard (no Pro vocab leaks into the free Snapshot), and the level
 catalog / RR formatting helpers.
 
-Run:  python scripts/test_scaffold_payload.py
+Run:  python -m pytest tests/test_scaffold_payload.py
 """
 import os
 import sys

@@ -1,7 +1,7 @@
 """Outcome scorer — resolves a report's falsifiable predictions and appends to the ledger.
 
 Usage:
-  python scripts/score_report.py <predictions.json> [--hourly <csv>] [--force]
+  python -m scripts.pipeline.scoring.score_report <predictions.json> [--hourly <csv>] [--force]
          [--manual ID=V[,ID=V...]] [--dry-run]
 
   --manual P5=Y[,P6=NT]  resolve `type:"manual"` predictions (verdicts: Y, N, NT).
@@ -35,7 +35,7 @@ MANUAL (needs human input). Hit rate counts Y / (Y + N).
 Ledger: ledger/outcome_ledger.csv  (append-only, one row per scored report)
 
 Exit codes: 0 scored or window-still-open · 2 argument/validation error ·
-3 hourly CSV does not cover the window (refresh via scripts/intraday.py, then retry).
+3 hourly CSV does not cover the window (refresh via python -m scripts.pipeline.marketdata.intraday, then retry).
 
 Once the ledger holds >=10 reports the summary gains a `calibration` block: realized
 hit rate by stated-confidence bucket (<=60 / 61-75 / >75) — stated confidence should
@@ -308,7 +308,7 @@ def _write_scored_sidecar(report_id, predictions, results):
 
 def main():
     if len(sys.argv) < 2:
-        print("usage: python scripts/score_report.py <predictions.json> [--hourly csv] "
+        print("usage: python -m scripts.pipeline.scoring.score_report <predictions.json> [--hourly csv] "
               "[--force] [--manual ID=V,...] [--dry-run]")
         sys.exit(2)
     pred_path = Path(sys.argv[1])
@@ -334,7 +334,7 @@ def main():
         wend = now
     csv_path = opts["hourly"] or p["hourly_csv"]
     bars = load_bars(csv_path, parse_dt(p["window_start_utc"]), wend)
-    refresh_cmd = (f"python scripts/intraday.py {p.get('symbol', '<SYMBOL>')} "
+    refresh_cmd = (f"python -m scripts.pipeline.marketdata.intraday {p.get('symbol', '<SYMBOL>')} "
                    f"--name {Path(csv_path).name.replace('_hourly.csv', '')}"
                    + (f" --roll-utc {p['roll_utc']}" if p.get("roll_utc") else ""))
     if not bars:

@@ -4,7 +4,7 @@ shared anchor math compute_pivots_bands (golden values, division/None guards).
 These are offline: no network. The intraday tests exercise only the pure math
 helper that the --anchor path reuses, so the live fetch path is never touched.
 
-Run:  python scripts/test_sessions_intraday.py
+Run:  python -m pytest tests/test_sessions_intraday.py
 """
 import os
 import sys

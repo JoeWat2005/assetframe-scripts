@@ -23,7 +23,7 @@ It is intentionally narrow:
   * Reuses engine_ops.connect()/database_url() (and its .env loader) so DATABASE_URL is resolved
     EXACTLY like every other box-side write — same Neon URL, same fallback contract.
 
-CLI: python scripts/sync_backtest.py        # upsert ledger/sim -> backtest_results
+CLI: python -m scripts.analytics.store.sync_backtest        # upsert ledger/sim -> backtest_results
 """
 import csv
 import json

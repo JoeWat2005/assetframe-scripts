@@ -6,7 +6,7 @@ Offline: every network call is monkeypatched, so this never touches a real feed.
   - fetch_chart provider chain: yahoo -> coingecko (crypto daily), raise for non-crypto daily,
     and the preserved degrade path (a failed HOURLY re-raises so daily-only kicks in).
 
-Run:  python scripts/test_data_fallback.py
+Run:  python -m pytest tests/test_data_fallback.py
 """
 import os
 import sys

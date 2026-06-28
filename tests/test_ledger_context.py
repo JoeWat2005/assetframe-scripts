@@ -2,7 +2,7 @@
 (window_end strictly before as_of), graceful empty-ledger degradation, and the
 taxonomy-scoped breakdowns shared with confidence.
 
-Run:  python scripts/test_ledger_context.py
+Run:  python -m pytest tests/test_ledger_context.py
 """
 import csv
 import os

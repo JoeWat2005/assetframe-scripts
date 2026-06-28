@@ -17,7 +17,7 @@ NO LOOK-AHEAD: all history is filtered to windows that closed before `as_of`
 Usage:
   from memory_pack import build_pack
   pack = build_pack(asset, as_of=datetime.now(timezone.utc))   # dict, <= budget tokens
-  python scripts/memory_pack.py <asset_id> [--as-of "YYYY-MM-DD HH:MM"]
+  python -m scripts.analytics.memory.memory_pack <asset_id> [--as-of "YYYY-MM-DD HH:MM"]
 """
 import json
 import sys
@@ -121,7 +121,7 @@ def build_pack(asset, as_of=None, ledger=DEFAULT_LEDGER, token_budget=TOKEN_BUDG
 def main():
     import config_loader
     if len(sys.argv) < 2:
-        print("usage: python scripts/memory_pack.py <asset_id> [--as-of 'YYYY-MM-DD HH:MM']")
+        print("usage: python -m scripts.analytics.memory.memory_pack <asset_id> [--as-of 'YYYY-MM-DD HH:MM']")
         sys.exit(2)
     asset = config_loader.get_asset(sys.argv[1])
     as_of = None

@@ -3,7 +3,7 @@
 Covers: blend weights sum, every hard cap, social subtract-only (never raises),
 calibration-map apply, compute_dq, determinism/reproducibility, and division guards.
 
-Run:  python scripts/test_confidence.py
+Run:  python -m pytest tests/test_confidence.py
 """
 import os
 import sys

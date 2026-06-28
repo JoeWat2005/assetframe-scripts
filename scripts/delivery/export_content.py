@@ -2,7 +2,7 @@
 
 Writes the catalog + track-record as JSON the web app reads. Report files are NOT copied
 into the web app: every file (free Snapshots AND Pro reports) is private in R2 (pushed by
-scripts/publish.py) and served only through the auth-gated /api/report route.
+scripts/delivery/publish.py) and served only through the auth-gated /api/report route.
 
 Usage:
   python -m scripts.delivery.export_content [--web web] [--include-dev]
@@ -439,7 +439,7 @@ def main():
         "componentVsOutcome": aggregates["componentVsOutcome"],
     }
 
-    # Report files live in private R2 (run scripts/publish.py), not in the web app.
+    # Report files live in private R2 (run scripts/delivery/publish.py), not in the web app.
     for e in catalog:
         del e["_dir"]
 
@@ -450,7 +450,7 @@ def main():
     print(f"  editions:    {len(catalog)}")
     print(f"  open calls:  {len(open_calls)}")
     print(f"  scored rows: {total}" + ("  (calibration ready)" if calib else ""))
-    print("All report files (free + Pro) are private in R2 - run scripts/publish.py to push them.")
+    print("All report files (free + Pro) are private in R2 - run scripts/delivery/publish.py to push them.")
 
 
 if __name__ == "__main__":

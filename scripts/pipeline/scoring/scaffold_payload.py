@@ -21,7 +21,7 @@ that aren't in the level set. The narrative (theses, scenarios, risks) comes fro
 the brief; the numbers and structure come from here.
 
 Usage:
-  python scripts/scaffold_payload.py <NAME> \
+  python -m scripts.pipeline.scoring.scaffold_payload <NAME> \
       [--analysis data/analysis/<NAME>_analysis.json] \
       [--brief data/briefs/<NAME>_research_brief.json] \
       [--research data/research/<NAME>_research_pack.json] \
@@ -638,7 +638,7 @@ def _period_stamp(cadence, window_start_utc, as_of_dt):
 
 def main():
     if len(sys.argv) < 2:
-        print("usage: python scripts/scaffold_payload.py <NAME> [--brief ...] [--session-profile ...] [--check]")
+        print("usage: python -m scripts.pipeline.scoring.scaffold_payload <NAME> [--brief ...] [--session-profile ...] [--check]")
         sys.exit(2)
     name = sys.argv[1]
     o = parse_args(sys.argv[2:])

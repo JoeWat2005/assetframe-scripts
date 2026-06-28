@@ -1,5 +1,5 @@
 // Sync the generated content (web/content/*.json) into Neon Postgres.
-// Run after `python scripts/export_content.py`:  node scripts/sync-db.mjs
+// Run after `python -m scripts.delivery.export_content`:  node scripts/sync-db.mjs
 // Applies to EVERY configured target so one publish updates prod AND the dev branch:
 //   DATABASE_URL        (primary / production — Neon main branch)
 //   DATABASE_URL_DEV    (optional — Neon `development` branch, used by preview deploys)
@@ -55,11 +55,11 @@ let guardCatalog;
 try {
   guardCatalog = readJson("catalog.json");
 } catch (err) {
-  console.error(`Refusing to sync — cannot read content/catalog.json (${err.message}). Run \`python scripts/export_content.py\` first.`);
+  console.error(`Refusing to sync — cannot read content/catalog.json (${err.message}). Run \`python -m scripts.delivery.export_content\` first.`);
   process.exit(1);
 }
 if (!Array.isArray(guardCatalog)) {
-  console.error("Refusing to sync — content/catalog.json is not an array (corrupt export). Run `python scripts/export_content.py` first.");
+  console.error("Refusing to sync — content/catalog.json is not an array (corrupt export). Run `python -m scripts.delivery.export_content` first.");
   process.exit(1);
 }
 if (guardCatalog.length === 0) {

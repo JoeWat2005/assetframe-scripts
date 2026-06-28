@@ -2,7 +2,7 @@
 build error), the negated-"guaranteed" allowance, and the neutral
 "AssetFrame published..." framing of generated drafts.
 
-Run:  python scripts/test_social_posts.py
+Run:  python -m pytest tests/test_social_posts.py
 """
 import os
 import sys

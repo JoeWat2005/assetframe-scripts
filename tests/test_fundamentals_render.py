@@ -1,7 +1,7 @@
 """Fundamentals render: the shared extractor + the HTML twin (the PDF twin uses the same rows).
 Figures come straight from the canonical block, so the report can never show a fabricated number.
 
-Offline, stdlib only.  Run:  python scripts/test_fundamentals_render.py
+Offline, stdlib only.  Run:  python -m pytest tests/test_fundamentals_render.py
 """
 import os
 import sys

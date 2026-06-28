@@ -30,7 +30,7 @@ Decision meanings:
   stand_aside   the HONEST call is no-trade / wait (not a brief defect) — skip publish.
 
 Usage:
-  python scripts/critic.py <brief_path> --asset <TICKER> \
+  python -m scripts.pipeline.authoring.critic <brief_path> --asset <TICKER> \
       [--analysis <path>] [--research <path>] [--model <id>] [--max-tokens N]
 
 Reads ANTHROPIC_API_KEY from the environment (clear error + exit 3 if unset).

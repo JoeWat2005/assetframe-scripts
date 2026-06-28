@@ -2,7 +2,7 @@
 calibration summary, the manual-verdict validator, and the append-only ledger
 write (never rewrites existing rows).
 
-Run:  python scripts/test_score_report.py
+Run:  python -m pytest tests/test_score_report.py
 """
 import csv
 import json

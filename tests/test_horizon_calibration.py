@@ -1,7 +1,7 @@
 """Phase 2 foundation: horizon-aware calibration (calibrate.build_calibration +
 confidence._apply_calibration) and the per-asset timeframes / fetch-flag config defaults.
 
-Offline, stdlib only.  Run:  python scripts/test_horizon_calibration.py
+Offline, stdlib only.  Run:  python -m pytest tests/test_horizon_calibration.py
 """
 import os
 import sys

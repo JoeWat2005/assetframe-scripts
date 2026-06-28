@@ -16,7 +16,7 @@ current engine (`conf_version` == confidence.CONF_VERSION) are used, so the old
 freehand-era scores don't contaminate the fit.
 
 Usage:
-  python scripts/calibrate.py [--ledger ledger/outcome_ledger.csv]
+  python -m scripts.analytics.store.calibrate [--ledger ledger/outcome_ledger.csv]
          [--out ledger/calibration_map.json] [--conf-version 2]
          [--n-full 40] [--min-rows 5] [--dry-run]
 

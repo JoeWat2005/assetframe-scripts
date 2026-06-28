@@ -1,8 +1,8 @@
 """AssetFrame report generator - Snapshot (free) + Pro pair, website-ready.
 
 Usage:
-  python scripts/mvp_report.py <payload.json>            generate everything
-  python scripts/mvp_report.py <out_dir> --stamp-visual  set visual_inspection_passed
+  python -m scripts.pipeline.render.mvp_report <payload.json>            generate everything
+  python -m scripts.pipeline.render.mvp_report <out_dir> --stamp-visual  set visual_inspection_passed
 
 Brand: AssetFrame - "Next-session market intelligence, scored after the fact."
 Products: AssetFrame Snapshot (1 page, lead magnet) and AssetFrame Pro (3-6

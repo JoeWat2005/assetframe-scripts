@@ -21,7 +21,7 @@ hit is a build error -> exit 2, nothing written. "Guaranteed" is allowed only in
 negated compliance form ("no outcome is guaranteed").
 
 Usage:
-  python scripts/social_posts.py <NAME> [--payload data/payloads/<NAME>_af_payload.json]
+  python -m scripts.pipeline.packs.social_posts <NAME> [--payload data/payloads/<NAME>_af_payload.json]
          [--date YYYY-MM-DD] [--out data/social_posts/<NAME>_<DATE>_posts.json] [--print]
 
 Exit codes: 0 ok / 2 missing payload, bad args, or safe-wording QA failure.
@@ -156,7 +156,7 @@ def parse_args(argv):
 
 def main():
     if len(sys.argv) < 2:
-        print("usage: python scripts/social_posts.py <NAME> [--payload path] "
+        print("usage: python -m scripts.pipeline.packs.social_posts <NAME> [--payload path] "
               "[--date YYYY-MM-DD] [--out path] [--print]")
         sys.exit(2)
     name = sys.argv[1]

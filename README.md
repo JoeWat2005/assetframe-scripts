@@ -18,7 +18,7 @@ They share **R2** (report files) and **Neon** (tables) — **no shared code**. T
 - **Neon** — the engine `INSERT`s, the web `SELECT`s: `editions`, `open_calls`,
   `open_call_predictions`, `scored_results` (id format `AF-YYYYMMDD-<SLUG>` / `report_ref`).
   **Schema migrations live in `assetframe-infra`; the engine only inserts data.**
-- **Enums** — `scripts/taxonomy.py` (confidence buckets / asset classes) is mirrored in the infra
+- **Enums** — `scripts/pipeline/scoring/taxonomy.py` (confidence buckets / asset classes) is mirrored in the infra
   repo's `web/lib/content.ts`. Keep the two in sync.
 
 ## Setup

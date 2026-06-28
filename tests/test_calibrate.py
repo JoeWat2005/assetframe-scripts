@@ -1,7 +1,7 @@
 """Tests for calibrate.py — PAVA monotonicity, shrinkage-to-identity, and the
 empty/young-ledger identity guarantees.
 
-Run:  python scripts/test_calibrate.py
+Run:  python -m pytest tests/test_calibrate.py
 """
 import csv
 import os

@@ -2,7 +2,7 @@
 and the --no-news CLI flag. TD /news is a business-tier feature (404 on the individual Grow plan),
 so WebSearch stays the news source and this just gates how much of it the brief does.
 
-Offline, stdlib only.  Run:  python scripts/test_news_toggle.py
+Offline, stdlib only.  Run:  python -m pytest tests/test_news_toggle.py
 """
 import os
 import sys

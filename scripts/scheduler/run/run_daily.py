@@ -35,7 +35,7 @@ still apply inside the batch. The synchronous per-asset path is the automatic fa
 submission fails (or returns no clean outcome), so the run can never hard-stop on the batch step.
 
 Usage:
-  python scripts/run_daily.py [--universe config/assets.json] [--asset <id>]
+  python -m scripts.scheduler.run.run_daily [--universe config/assets.json] [--asset <id>]
         [--asset-class fx] [--mode dry_run|score_only|generate_only|production]
         [--date YYYY-MM-DD] [--as-of "YYYY-MM-DD HH:MM"] [--workers 4] [--no-render]
         [--sandbox]

@@ -16,7 +16,7 @@ so day-one generation still runs. Reads the additive taxonomy columns
 rows missing a dimension simply don't count toward that dimension's breakdown.
 
 Usage:
-  python scripts/research_memory.py [--ledger ledger/outcome_ledger.csv]
+  python -m scripts.analytics.memory.research_memory [--ledger ledger/outcome_ledger.csv]
          [--as-of "YYYY-MM-DD HH:MM"] [--out ledger/research_memory.json]
          [--min-n 4] [--print]
 """

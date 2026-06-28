@@ -1,7 +1,7 @@
 """Validate config/assets.json and print the universe. Exit 2 on any error, 0 on OK.
 
 Usage:
-  python scripts/validate_config.py [config/assets.json]
+  python -m scripts.scheduler.config.validate_config [config/assets.json]
 """
 import sys
 from datetime import datetime, timezone

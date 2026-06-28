@@ -10,14 +10,14 @@ Why this matters: engagement (impressions / clicks / likes) is a popularity sign
 ever fed back into confidence, bias, or outcome scoring, the system would start optimising
 for what spreads instead of what's correct. This test makes that regression a build failure.
 
-Run from mvp/:  python scripts/test_firewall.py
+Run:  python -m pytest tests/test_firewall.py
 (stdlib only; resolves its own paths, so cwd doesn't actually matter.)
 """
 import re
 import sys
 from pathlib import Path
 
-# mvp/ root, resolved from this file's location (scripts/test_firewall.py).
+# mvp/ root, resolved from this file's location (tests/test_firewall.py).
 ROOT = Path(__file__).resolve().parent.parent
 
 # The research-scoring modules that MUST NOT know marketing metrics exist.

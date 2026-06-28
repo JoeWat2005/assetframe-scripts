@@ -1,7 +1,7 @@
 """Intraday data fetch + analysis for the advisor — stdlib only.
 
 Usage:
-  python scripts/intraday.py SYMBOL [--name NAME] [--datadir data]
+  python -m scripts.pipeline.marketdata.intraday SYMBOL [--name NAME] [--datadir data]
          [--hrange 10d] [--drange 1y] [--roll-utc 22] [--related "SYM1,SYM2,SYM3"]
          [--provider yahoo|eodhd|twelvedata] [--anchor live|prior-completed|friday]
          [--as-of "YYYY-MM-DD HH:MM"] [--session-profile fx_spot|us_equity_rth|...]
