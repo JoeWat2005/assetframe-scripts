@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 
 from _paths import ROOT          # repo-root anchor (scripts/__init__ shim is on sys.path under -m)
+from _r2 import R2Store          # shared env-load + boto3 client (deduped with r2_purge.py)
 REPORTS = ROOT / "reports"
 # Every report file is private in R2 now (free Snapshots AND Pro reports); the web app
 # serves them only through the auth-gated /api/report route. Keys mirror the request path.
@@ -37,22 +38,6 @@ UPLOAD_FILES = {
     "pro.html": "text/html; charset=utf-8",
     "pro.pdf": "application/pdf",
 }
-
-
-def _load_local_env():
-    """Populate missing R2_* vars from the engine repo's .env so `python -m scripts.delivery.publish`
-    works without exporting them by hand."""
-    envfile = ROOT / ".env"
-    if not envfile.exists():
-        return
-    for line in envfile.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        k, v = k.strip(), v.strip()
-        if k.startswith("R2_") and not os.environ.get(k):
-            os.environ[k] = v
 
 
 def discover(date_filter):
@@ -87,28 +72,9 @@ def main():
             print(f"  {key}")
         return
 
-    _load_local_env()
-    env = {k: os.environ.get(k, "") for k in
-           ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET")}
-    missing = [k for k, v in env.items() if not v]
-    if missing:
-        print("Missing environment variables: " + ", ".join(missing) +
-              "\nSet them (see LAUNCH.md) or use --dry-run.", file=sys.stderr)
+    store = R2Store.from_env("Set them (see LAUNCH.md) or use --dry-run.")
+    if store is None:
         sys.exit(2)
-
-    try:
-        import boto3  # noqa
-    except ImportError:
-        print("boto3 is required:  pip install boto3", file=sys.stderr)
-        sys.exit(2)
-
-    client = boto3.client(
-        "s3",
-        endpoint_url=f"https://{env['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
-        aws_access_key_id=env["R2_ACCESS_KEY_ID"],
-        aws_secret_access_key=env["R2_SECRET_ACCESS_KEY"],
-        region_name="auto",
-    )
     uploaded, vanished, failed = 0, [], []
     for path, key, ctype in items:
         if not path.exists():
@@ -126,7 +92,7 @@ def main():
         err = None
         for attempt in range(3):          # 3 attempts (2s, 4s) on top of boto3's own retries
             try:
-                client.put_object(Bucket=env["R2_BUCKET"], Key=key, Body=body, ContentType=ctype)
+                store.put(key, body, ctype)
                 err = None
                 break
             except Exception as ex:
@@ -145,7 +111,7 @@ def main():
         summary += f", {len(vanished)} vanished"
     if failed:
         summary += f", {len(failed)} FAILED"
-    print(summary + f" -> bucket '{env['R2_BUCKET']}'.")
+    print(summary + f" -> bucket '{store.bucket}'.")
     if failed:
         # Real upload errors are surfaced as a non-zero exit (the publish chain checks this),
         # but only AFTER every file was attempted — no more aborting on the first failure.
