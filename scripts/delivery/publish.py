@@ -22,9 +22,7 @@ Object keys mirror the paths /api/report requests: <date>/<slug>/{free,pro}.{htm
 and <date>/<slug>/preview.png
 """
 import argparse
-import os
 import sys
-from pathlib import Path
 
 from _paths import ROOT          # repo-root anchor (scripts/__init__ shim is on sys.path under -m)
 from _r2 import R2Store          # shared env-load + boto3 client (deduped with r2_purge.py)
