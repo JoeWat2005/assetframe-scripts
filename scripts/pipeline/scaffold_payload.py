@@ -41,12 +41,8 @@ from pathlib import Path
 import taxonomy
 import confidence as conf_engine
 from sessions import get_session, get_window, get_cadence_window, CADENCE_WINDOWS
-
-try:
-    from zoneinfo import ZoneInfo
-    _LONDON = ZoneInfo("Europe/London")
-except Exception:                       # pragma: no cover - fallback for old stdlib
-    _LONDON = None
+# Presentation helpers live in formatting.py now; re-exported so this module's references are unchanged.
+from formatting import _LONDON, _dp, _to_london_dt, to_display, _ld_short  # noqa: F401
 
 VALID_QUALITY = {"High quality", "Acceptable", "Low quality", "Management only", "No-trade"}
 DISCLAIMER_FREE = ("General market research only. Not personal financial advice. "
@@ -78,52 +74,6 @@ def read_last_bar(csv_path):
     if not last:
         die(f"no data rows in {csv_path}")
     return round(float(last[4]), _dp(float(last[4]))), last[0][:16]
-
-
-def _dp(v):
-    """Sensible decimal places for a price. FX majors (~1-2, e.g. 1.3406) need 4dp or
-    adjacent pivots/bands collapse onto a single value (3 levels, no setups); JPY
-    crosses / indices / metals / futures (>=10) read fine at 2dp; sub-1 FX/crypto at 5dp."""
-    av = abs(v)
-    if av >= 10:
-        return 2
-    if av >= 1:
-        return 4
-    return 5
-
-
-def _to_london_dt(utc_str):
-    try:
-        dt = datetime.strptime(utc_str[:16], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
-    except ValueError:
-        return None
-    return dt.astimezone(_LONDON) if _LONDON else dt + timedelta(hours=1)
-
-
-def to_display(utc_str):
-    """'YYYY-MM-DD HH:MM' UTC -> 'Mon 15 Jun 2026 14:30 UTC (15:30 BST)' -
-    UTC primary (standard) with the London local time + abbrev alongside."""
-    try:
-        u = datetime.strptime(utc_str[:16], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
-    except ValueError:
-        return utc_str
-    loc = _to_london_dt(utc_str)
-    base = f"{u:%a} {u.day} {u:%b %Y %H:%M} UTC"
-    if loc is None:
-        return base
-    if _LONDON:
-        ld = f"{loc:%H:%M %Z}"  # zoneinfo gives the correct BST/GMT abbrev
-    else:
-        # no tz database: approximate UK clock (matches to_london's fallback) and
-        # label by season so winter never gets mislabelled as BST
-        abbr = "BST" if 3 <= u.month <= 10 else "GMT"
-        ld = f"{loc:%H:%M} {abbr}"
-    return f"{base} ({ld})"
-
-
-def _ld_short(utc_str):
-    loc = _to_london_dt(utc_str)
-    return f"{loc:%a %H:%M} UK" if loc else utc_str
 
 
 def load_json(path, required=False, what=""):

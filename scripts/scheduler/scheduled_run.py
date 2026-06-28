@@ -27,9 +27,8 @@ config_loader.apply_runtime_env(ROOT / "config" / "engine.json")
 import engine_ops
 
 
-def _log(msg):
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[scheduled {ts}Z] {msg}", flush=True)
+from _service import service_log
+_log = service_log("scheduled")
 
 
 def _record_skip(conn):

@@ -48,9 +48,8 @@ def _handle_sigterm(signum, frame):       # pragma: no cover - signal path
     _log("SIGTERM received — shutting down after the current tick")
 
 
-def _log(msg):
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[poller {ts}Z] {msg}", flush=True)
+from _service import service_log
+_log = service_log("poller")
 
 
 SAFETY_NEON_EVERY = 60   # ticks — a periodic Neon claim (~30 min at 30s) in case a wake was missed
