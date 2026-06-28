@@ -25,12 +25,9 @@ from _paths import ROOT          # repo-root anchor (scripts/__init__ shim is on
 # module can never break the export.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
-    from taxonomy import ASSET_CLASS_KEYS, validate_asset_class
+    from taxonomy import ASSET_CLASS_KEYS
 except Exception:                       # pragma: no cover - standalone fallback
     ASSET_CLASS_KEYS = ("equity", "crypto", "fx", "futures", "index", "commodity")
-
-    def validate_asset_class(v):
-        return v
 
 
 def _publish_policy_by_ticker():
@@ -336,8 +333,8 @@ def load_track_record(ledger_csv, pred_dir, scored_ids):
             for r in rows:
                 try:
                     c, hr = float(r["confidence"]), float(r["hit_rate_pct"])
-                except (ValueError, KeyError):
-                    continue
+                except (ValueError, KeyError, TypeError):
+                    continue                  # TypeError: a truncated final ledger row yields None
                 buckets["<=60" if c <= 60 else ("61-75" if c <= 75 else ">75")].append(hr)
             calib = {k: {"hitRate": round(sum(v) / len(v), 1) if v else None, "n": len(v)}
                      for k, v in buckets.items()}

@@ -432,6 +432,7 @@ def get_cadence_window(profile_key, cadence, now=None, holiday_dates=None,
     # owns a distinct window that closes BEFORE the next run and grades cleanly the following morning.
     if ptype == "crypto_24_7" and cadence == "daily":
         _now = now or datetime.now(UTC)
+        _now = _now.replace(tzinfo=UTC) if _now.tzinfo is None else _now.astimezone(UTC)  # 21:00 is UTC
         _close = _now.replace(hour=21, minute=0, second=0, microsecond=0)
         if _close <= _now + timedelta(minutes=min_remaining_min):
             _close = _close + timedelta(days=1)

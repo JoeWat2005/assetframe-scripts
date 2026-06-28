@@ -75,7 +75,6 @@ BRIEF_DIR = ROOT / "data" / "briefs"
 MEMPACK_DIR = ROOT / "data" / "memory_packs"
 RESEARCH_DIR = ROOT / "data" / "research"
 SOCIAL_DIR = ROOT / "data" / "social"
-LEDGER = ROOT / "ledger" / "outcome_ledger.csv"
 
 # Autonomous brief authoring (brief_writer.py + critic.py). Only engaged when a brief
 # is MISSING and the mode generates; a keyless run or a writer failure degrades back to
@@ -314,10 +313,7 @@ def score_step(now, tickers=None):
         except ValueError:
             _arg = str(pf)
         ok, out, err = _run(["-m", "scripts.pipeline.score_report", _arg])
-        try:
-            summary = json.loads(out[out.index("{"):]) if "{" in out else {}
-        except Exception:
-            summary = {}
+        summary = _parse_last_json(out)   # robust top-level-object scan; a '{' in a log line is safe
         rec = {"file": pf.name, "report_id": rid,
                "skipped_duplicate": summary.get("skipped_duplicate"),
                "hit_rate_pct": summary.get("hit_rate_pct"),
@@ -547,20 +543,6 @@ def _sync_critique_one(it):
         cmd += ["--research", _rel_to_root(rp)]
     _ok, _rc, out, _err = _run_rc(cmd, timeout=CRITIC_TIMEOUT)
     return _parse_last_json(out) or {}
-
-
-def _issues_to_guidance(verdict):
-    """Render the critic's issues into a compact guidance string for the re-author."""
-    lines = []
-    for it in verdict.get("issues", []):
-        if isinstance(it, dict):
-            lines.append(f"[{it.get('severity','issue')}] {it.get('field','')}: "
-                         f"{it.get('problem','')} -> {it.get('fix','')}".strip())
-        else:
-            lines.append(str(it))
-    for adj in verdict.get("confidence_adjustments", []):
-        lines.append(f"[conviction] {adj}")
-    return "\n".join(lines) or (verdict.get("summary", ""))
 
 
 def _safe_unlink(path):
@@ -1070,17 +1052,20 @@ def main():
     # scorer's scan dir) at data/predictions/sim so score_step grades ONLY sandbox files,
     # and pre-create the sim/ roots so the first write never races a missing dir.
     if o["sandbox"]:
-        global PRED_DIR, BRIEF_DIR
+        global PRED_DIR, BRIEF_DIR, RESEARCH_DIR, SOCIAL_DIR, MEMPACK_DIR
         os.environ["ASSETFRAME_SANDBOX"] = "1"
         PRED_DIR = ROOT / "data" / "predictions" / "sim"
-        # Isolate briefs too: a backtest must NOT reuse the LIVE brief (authored with current news =
-        # look-ahead). The sim brief dir starts empty, so each backdated day authors a FRESH
-        # technical-only (--no-news) brief and never touches the live data/briefs/ tree. scaffold
-        # mirrors this (reads data/briefs/sim + data/research/sim + data/social/sim under sandbox).
+        # Isolate briefs AND the research/social/memory packs: a backtest must NOT reuse the LIVE
+        # packs (built from current news/ledger = look-ahead) — and must not overwrite them. The sim
+        # dirs start empty, so each backdated day authors a FRESH technical-only (--no-news) brief and
+        # sees no live packs. scaffold mirrors this (reads .../sim under sandbox).
         BRIEF_DIR = ROOT / "data" / "briefs" / "sim"
+        RESEARCH_DIR = ROOT / "data" / "research" / "sim"
+        SOCIAL_DIR = ROOT / "data" / "social" / "sim"
+        MEMPACK_DIR = ROOT / "data" / "memory_packs" / "sim"
         (ROOT / "ledger" / "sim").mkdir(parents=True, exist_ok=True)
-        PRED_DIR.mkdir(parents=True, exist_ok=True)
-        BRIEF_DIR.mkdir(parents=True, exist_ok=True)
+        for _d in (PRED_DIR, BRIEF_DIR, RESEARCH_DIR, SOCIAL_DIR, MEMPACK_DIR):
+            _d.mkdir(parents=True, exist_ok=True)
     now = resolve_now(o)
     run_date = (now.astimezone(LONDON) if LONDON else now).strftime("%Y-%m-%d")
     run_id = f"daily-{run_date}"

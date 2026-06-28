@@ -117,7 +117,12 @@ def main():
             vanished.append(key)
             print(f"skipped   {key} (file no longer present)")
             continue
-        body = path.read_bytes()
+        try:
+            body = path.read_bytes()
+        except FileNotFoundError:             # vanished between exists() and read -> benign race, not a failure
+            vanished.append(key)
+            print(f"skipped   {key} (file vanished before upload)")
+            continue
         err = None
         for attempt in range(3):          # 3 attempts (2s, 4s) on top of boto3's own retries
             try:

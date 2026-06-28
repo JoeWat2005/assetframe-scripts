@@ -335,12 +335,14 @@ def scope_to_run_args(scope):
 
 
 # --------------------------------------------------------------- manifest parse
-def _read_run_manifest():
+def _read_run_manifest(since=None):
     """Find the most recently written runs/<date>/run_manifest.json and return it.
 
     run_daily writes runs/<London-date>/run_manifest.json. We don't know the date the
-    child chose (London vs UTC edge), so pick the newest manifest by mtime. Returns
-    (manifest_dict_or_None, path_or_None)."""
+    child chose (London vs UTC edge), so pick the newest manifest by mtime. If `since` (epoch
+    seconds) is given, a newest manifest OLDER than it means THIS run died before writing its own
+    manifest -> return (None, None) rather than the PREVIOUS run's manifest (which would report the
+    wrong success counts for the failed run). Returns (manifest_dict_or_None, path_or_None)."""
     runs_dir = ROOT / "runs"
     if not runs_dir.is_dir():
         return None, None
@@ -348,10 +350,13 @@ def _read_run_manifest():
                        key=lambda p: p.stat().st_mtime, reverse=True)
     if not manifests:
         return None, None
+    newest = manifests[0]
+    if since is not None and newest.stat().st_mtime < since:
+        return None, None
     try:
-        return json.loads(manifests[0].read_text(encoding="utf-8-sig")), manifests[0]
+        return json.loads(newest.read_text(encoding="utf-8-sig")), newest
     except Exception:
-        return None, manifests[0]
+        return None, newest
 
 
 def summarize_manifest(manifest):
@@ -380,9 +385,9 @@ def summarize_manifest(manifest):
     }
     if manifest.get("score") is not None:
         s = manifest["score"]
-        out["score"] = {"scored": len(s.get("scored", [])),
-                        "skipped": len(s.get("skipped", [])),
-                        "errors": len(s.get("errors", []))}
+        out["score"] = {"scored": len(s.get("scored") or []),
+                        "skipped": len(s.get("skipped") or []),
+                        "errors": len(s.get("errors") or [])}
     if manifest.get("token_cost") is not None:
         out["token_cost"] = manifest["token_cost"]
     # bubble up any per-asset errors so failures are visible in the summary.
@@ -839,7 +844,7 @@ def _exec_run_daily(conn, args, request_id):
     if cancelled:
         return "cancelled", {}, "cancelled by admin request", log_excerpt
 
-    manifest, _path = _read_run_manifest()
+    manifest, _path = _read_run_manifest(since=start)   # ignore a stale prior-run manifest
     results = summarize_manifest(manifest) if manifest else {}
 
     if err_msg:                       # timeout (or explicit error)
@@ -1370,14 +1375,21 @@ def _cmd_compute_due(conn, args):
     """Run run_daily --mode dry_run (no generation, no network) to compute the engine's DUE plan,
     then write each asset's due status back to engine_assets so the dashboard can show which
     instruments are scheduled to generate. Safe + read-only w.r.t. reports."""
+    _start = time.time()
     try:
-        p = subprocess.run([sys.executable, "-m", RUN_DAILY, "--mode", "dry_run"],
-                           cwd=str(ROOT), capture_output=True, text=True, timeout=180)
+        # hold the run lock: this dry-run writes runs/<date>/run_manifest.json, which would race +
+        # clobber a real daily oneshot's manifest if they overlap (this was the only run path that
+        # didn't take the lock).
+        with _FileLock(LOCK_PATH, blocking=False):
+            p = subprocess.run([sys.executable, "-m", RUN_DAILY, "--mode", "dry_run"],
+                               cwd=str(ROOT), capture_output=True, text=True, timeout=180)
+    except _FileLock.Locked:
+        return False, "a run is in progress; compute-due skipped (try again shortly)", None, False
     except Exception as ex:
         return False, f"dry_run failed to launch: {ex}"[:200], None, False
     if p.returncode != 0:
         return False, f"dry_run exited {p.returncode}", _tail((p.stdout or "") + (p.stderr or ""), 1000), False
-    manifest, _path = _read_run_manifest()
+    manifest, _path = _read_run_manifest(since=_start)
     plan = (manifest or {}).get("plan") or []
     if not plan:
         return False, "no plan found in the dry-run manifest", None, False

@@ -197,9 +197,6 @@ def build_taxonomy(prediction_type, direction, horizon, asset_class, market_regi
     }
 
 
-# Additive ledger columns this taxonomy introduces (consumed by score_report.py).
-LEDGER_TAXONOMY_COLS = ["conf_version", "pred_type", "direction", "horizon", "market_regime"]
-
 
 if __name__ == "__main__":
     import json

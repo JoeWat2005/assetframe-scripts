@@ -100,14 +100,6 @@ def _to_london_dt(utc_str):
     return dt.astimezone(_LONDON) if _LONDON else dt + timedelta(hours=1)
 
 
-def to_london(utc_str):
-    """'YYYY-MM-DD HH:MM' UTC -> 'Mon 15 Jun 2026 14:30 UK' (portable, no %-d)."""
-    loc = _to_london_dt(utc_str)
-    if loc is None:
-        return utc_str
-    return f"{loc:%a} {loc.day} {loc:%b %Y %H:%M} UK"
-
-
 def to_display(utc_str):
     """'YYYY-MM-DD HH:MM' UTC -> 'Mon 15 Jun 2026 14:30 UTC (15:30 BST)' -
     UTC primary (standard) with the London local time + abbrev alongside."""
@@ -857,7 +849,7 @@ def main():
     hourly_csv = (analysis.get("files") or {}).get("hourly_csv", f"data/candles/{name}_hourly.csv")
     try:
         last_price, last_ts = read_last_bar(hourly_csv)
-    except BriefError:
+    except (BriefError, FileNotFoundError, OSError):
         # Hourly series empty (e.g. a feed degraded to daily-only) — fall back to the daily candles
         # instead of aborting the whole asset. read_last_bar still dies if BOTH are empty.
         daily_csv = (analysis.get("files") or {}).get("daily_csv", f"data/candles/{name}_daily.csv")

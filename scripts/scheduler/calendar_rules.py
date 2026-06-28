@@ -152,24 +152,6 @@ def _target_date(asset, now):
     return now.astimezone(timezone.utc).date()
 
 
-def holiday_coverage(holidays=None):
-    """Return {calendar_key: (min_year, max_year)} present in the holiday table. A year that is
-    absent means holiday skips silently don't fire that year, so callers (validate_config) warn
-    when the current/next run year isn't covered."""
-    holidays = holidays if holidays is not None else load_holidays()
-    cov = {}
-    for k, dates in holidays.items():
-        years = []
-        for d in dates:
-            try:
-                years.append(int(str(d)[:4]))
-            except (ValueError, TypeError):
-                continue
-        if years:
-            cov[k] = (min(years), max(years))
-    return cov
-
-
 def is_holiday(asset, d, holidays=None):
     key = _calendar_key(asset)
     if not key:
@@ -188,9 +170,6 @@ def is_trading_day(asset, d, holidays=None):
 
 
 _OPEN_CADENCES = ("daily", "weekday", "trading_day", "weekday_or_market_open")
-# Scheduled cadences fire on a SPECIFIC calendar slot (a weekday / first-of-month) rather than
-# every open day. Used for longer-horizon products (a weekly outlook, a monthly outlook).
-_SCHEDULED_CADENCES = ("weekly", "monthly")
 _WD_NAMES = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
 
 

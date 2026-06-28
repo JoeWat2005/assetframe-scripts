@@ -180,7 +180,7 @@ def loop(interval):
         remaining = max(0.0, interval - elapsed)
         end = time.time() + remaining
         while not _STOP and time.time() < end:
-            time.sleep(min(1.0, end - time.time()))
+            time.sleep(max(0.0, min(1.0, end - time.time())))   # never negative across the clock edge
     engine_ops.stop_heartbeat_daemon()
     _log("stopped cleanly")
     return 0

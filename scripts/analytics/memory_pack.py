@@ -66,9 +66,10 @@ def build_pack(asset, as_of=None, ledger=DEFAULT_LEDGER, token_budget=TOKEN_BUDG
     by_class = (mem.get("by_asset_class") or {}).get(cls, {})
 
     def _class_rel(patterns):
+        # asset_class is exact-matched; the old substring branch leaked unrelated cross-dimension
+        # patterns (e.g. a 'crypto' regime pattern into an equity pack).
         return [p for p in (patterns or [])
-                if (p.get("dimension") == "asset_class" and p.get("pattern") == cls)
-                or (cls and cls in str(p.get("pattern", "")))][:3]
+                if p.get("dimension") == "asset_class" and p.get("pattern") == cls][:3]
 
     pack = {
         "instrument": ctx.get("instrument"), "ticker": ctx.get("ticker"), "asset_class": cls,

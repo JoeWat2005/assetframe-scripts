@@ -227,7 +227,13 @@ def main():
         sys.exit(2)
     name = sys.argv[1]
     opts = parse_args(sys.argv[2:])
-    as_of = parse_dt(opts["as_of"]) if opts["as_of"] else datetime.now(timezone.utc)
+    if opts["as_of"]:
+        as_of = parse_dt(opts["as_of"])
+        if as_of is None:                     # malformed -> exit cleanly (else load_rows: wend >= None TypeError)
+            print(f"ERROR: bad --as-of '{opts['as_of']}' (want 'YYYY-MM-DD HH:MM')")
+            sys.exit(2)
+    else:
+        as_of = datetime.now(timezone.utc)
     rows = load_rows(opts["ledger"], as_of)
     ctx = build_context(name, rows, ticker=opts["ticker"], asset_class=opts["asset_class"],
                         recent_k=opts["recent_k"])
