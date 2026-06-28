@@ -129,7 +129,7 @@ Sanity check the DB wiring before installing services:
 ```bash
 .venv/bin/python -c "import scripts.coordination.engine_ops as e; print('DATABASE_URL ok:', bool(e.database_url()))"
 # Then a single real tick (heartbeats + claims one request if queued, else no-op):
-.venv/bin/python -m scripts.scheduler.poller --once
+.venv/bin/python -m scripts.scheduler.service.poller --once
 ```
 
 If `DATABASE_URL` is missing you get a clear `ConfigError`, not a stack trace.

@@ -267,7 +267,7 @@ def score_step(now, tickers=None):
             _arg = str(pf.relative_to(ROOT))
         except ValueError:
             _arg = str(pf)
-        ok, out, err = _run(["-m", "scripts.pipeline.score_report", _arg])
+        ok, out, err = _run(["-m", "scripts.pipeline.scoring.score_report", _arg])
         summary = _parse_last_json(out)   # robust top-level-object scan; a '{' in a log line is safe
         rec = {"file": pf.name, "report_id": rid,
                "skipped_duplicate": summary.get("skipped_duplicate"),
@@ -297,9 +297,9 @@ def score_step(now, tickers=None):
         refresh = {"skipped": "sandbox"}
     else:
         refresh = {}
-        for label, cmd in (("calibrate", ["-m", "scripts.analytics.calibrate"]),
-                           ("research_memory", ["-m", "scripts.analytics.research_memory"]),
-                           ("ledger_db", ["-m", "scripts.analytics.ledger_db", "rebuild"])):
+        for label, cmd in (("calibrate", ["-m", "scripts.analytics.store.calibrate"]),
+                           ("research_memory", ["-m", "scripts.analytics.memory.research_memory"]),
+                           ("ledger_db", ["-m", "scripts.analytics.store.ledger_db", "rebuild"])):
             ok, _o, err = _run(cmd, timeout=60)
             refresh[label] = "ok" if ok else f"failed: {(err or '')[-120:]}"
     return {"scored": scored, "skipped": skipped, "errors": errors, "memory_refresh": refresh}
@@ -346,7 +346,7 @@ def _refresh_candles_for_scoring(now, assets):
             # break is scored as "held"). Floored at 10d, capped at 45d (hourly history limit).
             span_days = (now - need[tk]).days + 2
             hrange = f"{max(10, min(span_days, 45))}d"
-            cmd = ["-m", "scripts.pipeline.intraday", a["provider_symbols"]["yahoo"], "--name", tk,
+            cmd = ["-m", "scripts.pipeline.marketdata.intraday", a["provider_symbols"]["yahoo"], "--name", tk,
                    "--hrange", hrange, "--roll-utc", str(a.get("roll_utc", 0)),
                    "--session-profile", a["session_profile"]]
             tds = (a.get("provider_symbols") or {}).get("twelvedata")
@@ -397,7 +397,7 @@ def author_brief_step(asset, brief_path):
         return str(p.relative_to(ROOT))
 
     def _write(guidance=None):
-        cmd = ["-m", "scripts.pipeline.brief_writer", tk, "--analysis", _rel(analysis),
+        cmd = ["-m", "scripts.pipeline.authoring.brief_writer", tk, "--analysis", _rel(analysis),
                "--memory-pack", _rel(mempack), "--out", _rel(brief_path)]
         if research.exists():
             cmd += ["--research", _rel(research)]
@@ -416,7 +416,7 @@ def author_brief_step(asset, brief_path):
         return ok, rc, (err or out)
 
     def _critique():
-        cmd = ["-m", "scripts.pipeline.critic", _rel(brief_path), "--asset", tk, "--analysis", _rel(analysis)]
+        cmd = ["-m", "scripts.pipeline.authoring.critic", _rel(brief_path), "--asset", tk, "--analysis", _rel(analysis)]
         if research.exists():
             cmd += ["--research", _rel(research)]
         ok, rc, out, err = _run_rc(cmd, timeout=CRITIC_TIMEOUT)
@@ -504,7 +504,7 @@ def _sync_critique_one(it):
     # NB: it['analysis'] is the PARSED analysis JSON, not a path — rebuild the on-disk path here
     # (critic.py takes --analysis <path>, exactly as the sync _critique does).
     analysis_p = ROOT / "data" / "analysis" / f"{tk}_analysis.json"
-    cmd = ["-m", "scripts.pipeline.critic", _rel_to_root(it["brief_path"]), "--asset", tk,
+    cmd = ["-m", "scripts.pipeline.authoring.critic", _rel_to_root(it["brief_path"]), "--asset", tk,
            "--analysis", _rel_to_root(analysis_p)]
     rp = RESEARCH_DIR / f"{tk}_research_pack.json"
     if rp.exists():
@@ -601,7 +601,7 @@ def _data_prep(asset, now, as_of, rec, stage):
     now_arg = now.strftime("%Y-%m-%d %H:%M")
 
     # 1. data + analysis
-    icmd = ["-m", "scripts.pipeline.intraday", asset["provider_symbols"]["yahoo"], "--name", tk,
+    icmd = ["-m", "scripts.pipeline.marketdata.intraday", asset["provider_symbols"]["yahoo"], "--name", tk,
             "--hrange", "10d", "--roll-utc", str(asset.get("roll_utc", 0)),
             "--session-profile", asset["session_profile"]]
     _civ = asset.get("chart_intervals") or []
@@ -647,12 +647,12 @@ def _finish_asset(asset, now, no_render, as_of, rec, stage):
     # This writes the exact file scaffold reads, so the PUBLISHED confidence number learns
     # from the track record (not just the prose brief). BTC reruns use only BTC's rows;
     # an empty/young ledger yields a valid neutral context. Best-effort (never blocks).
-    lcmd = ["-m", "scripts.analytics.ledger_context", tk, "--ticker", tk,
+    lcmd = ["-m", "scripts.analytics.memory.ledger_context", tk, "--ticker", tk,
             "--asset-class", asset.get("asset_class", ""), "--as-of", now_arg]
     stage("ledger_context", lcmd, timeout=60)
 
     # 4. scaffold (payload + predictions + deterministic confidence)
-    scmd = ["-m", "scripts.pipeline.scaffold_payload", tk, "--session-profile", asset["session_profile"]]
+    scmd = ["-m", "scripts.pipeline.scoring.scaffold_payload", tk, "--session-profile", asset["session_profile"]]
     # Scoring cadence: every daily-frequency cadence (weekday/trading_day/...) scores at the day
     # close; weekly/monthly score at week/month end. Drives the canonical one-per-period window.
     score_cadence = {"weekly": "weekly", "monthly": "monthly"}.get(asset.get("cadence"), "daily")
@@ -671,7 +671,7 @@ def _finish_asset(asset, now, no_render, as_of, rec, stage):
 
     # 5. render + QA gate (or forecast-only)
     payload = f"data/payloads/{tk}_af_payload.json"
-    rcmd = ["-m", "scripts.pipeline.mvp_report", payload] + (["--no-render"] if no_render else [])
+    rcmd = ["-m", "scripts.pipeline.render.mvp_report", payload] + (["--no-render"] if no_render else [])
     ok, out = stage("mvp_report", rcmd, timeout=240)
     try:
         rec["report_id"] = json.loads(Path(ROOT / payload).read_text(encoding="utf-8-sig")).get("report_id")
@@ -1156,7 +1156,7 @@ def main():
         _hd = max(10, (real_now - now).days + 4)   # candle range must span the as-of window -> today
         print(f"refreshing full candles ({_hd}d) + scoring the backtest's closed windows...")
         for a in due_assets:
-            ricmd = ["-m", "scripts.pipeline.intraday", a["provider_symbols"]["yahoo"], "--name", a["ticker"],
+            ricmd = ["-m", "scripts.pipeline.marketdata.intraday", a["provider_symbols"]["yahoo"], "--name", a["ticker"],
                      "--hrange", f"{_hd}d", "--roll-utc", str(a.get("roll_utc", 0)),
                      "--session-profile", a["session_profile"]]
             _rtd = (a.get("provider_symbols") or {}).get("twelvedata")

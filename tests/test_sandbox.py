@@ -98,7 +98,7 @@ class ScaffoldSimPaths(unittest.TestCase):
 
     def test_scaffold_source_uses_env_guard(self):
         # Guard against a regression: the live source must gate BOTH defaults on the env var.
-        src = (Path(HERE).parent / "scripts" / "pipeline" / "scaffold_payload.py").read_text(encoding="utf-8")
+        src = (Path(HERE).parent / "scripts" / "pipeline" / "scoring" / "scaffold_payload.py").read_text(encoding="utf-8")
         self.assertIn('os.environ.get("ASSETFRAME_SANDBOX") == "1"', src)
         self.assertIn("data/predictions/sim/", src)
         self.assertIn("reports/sim/", src)
@@ -109,7 +109,7 @@ class RunDailyWiring(unittest.TestCase):
     """run_daily.py must (a) parse --sandbox, (b) arm ASSETFRAME_SANDBOX + repoint PRED_DIR
     first, and (c) skip the memory refresh under sandbox. Verified against the source so the
     test needs no network/subprocess."""
-    src = (Path(HERE).parent / "scripts" / "scheduler" / "run_daily.py").read_text(encoding="utf-8")
+    src = (Path(HERE).parent / "scripts" / "scheduler" / "run" / "run_daily.py").read_text(encoding="utf-8")
 
     def test_sandbox_flag_parsed(self):
         self.assertIn('a == "--sandbox"', self.src)

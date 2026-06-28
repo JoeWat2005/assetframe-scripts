@@ -36,10 +36,10 @@ The engine is a Python package (`scripts/` with concern subpackages: `pipeline`,
 `analytics`, `delivery`, `coordination`). Run every entrypoint as a module from the repo root:
 
 ```bash
-python -m scripts.scheduler.validate_config        # validate config/assets.json
-python -m scripts.scheduler.run_daily --mode dry_run       # resolve today's DUE assets, write nothing
-python -m scripts.scheduler.run_daily --mode score_only    # score closed windows + refresh memory (idempotent)
-python -m scripts.scheduler.run_daily --mode generate_only # generate due assets
+python -m scripts.scheduler.config.validate_config        # validate config/assets.json
+python -m scripts.scheduler.run.run_daily --mode dry_run       # resolve today's DUE assets, write nothing
+python -m scripts.scheduler.run.run_daily --mode score_only    # score closed windows + refresh memory (idempotent)
+python -m scripts.scheduler.run.run_daily --mode generate_only # generate due assets
 ```
 Modes: `dry_run | score_only | generate_only | production` (Phase 2 adds `approval`). Scope with
 `--asset <id>` or `--asset-class fx`. Run manifests land in `runs/<date>/run_manifest.json`.

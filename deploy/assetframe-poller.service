@@ -11,7 +11,7 @@ Type=simple
 # --- EDIT these three paths to match the VM ---
 WorkingDirectory=/opt/assetframe-scripts
 EnvironmentFile=/opt/assetframe-scripts/.env
-ExecStart=/opt/assetframe-scripts/.venv/bin/python -m scripts.scheduler.poller --interval 30
+ExecStart=/opt/assetframe-scripts/.venv/bin/python -m scripts.scheduler.service.poller --interval 30
 # ----------------------------------------------
 
 # Long-lived service: keep it up. The poller already rides out transient Neon blips,

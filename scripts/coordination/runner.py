@@ -7,8 +7,8 @@ from locking import _FileLock, LOCK_PATH
 from db import is_cancel_requested, _utcnow, RUN_TIMEOUT, _empty_dir, RunRecorder
 from manifest import scope_to_run_args, _read_run_manifest, summarize_manifest, _new_run_id, _tail
 
-RUN_DAILY = "scripts.scheduler.run_daily"          # spawned as `python -m <module>` (cwd = ROOT)
-SYNC_BACKTEST = "scripts.analytics.sync_backtest"  # pushes ledger/sim -> Neon backtest_results
+RUN_DAILY = "scripts.scheduler.run.run_daily"            # spawned as `python -m <module>` (cwd = ROOT)
+SYNC_BACKTEST = "scripts.analytics.store.sync_backtest"  # pushes ledger/sim -> Neon backtest_results
 # The sandbox working trees a backtest writes to (cleared by clear_sandbox; never the live trees).
 SANDBOX_DIRS = ["ledger/sim", "data/predictions/sim", "reports/sim",
                 "data/briefs/sim", "data/research/sim", "data/social/sim"]

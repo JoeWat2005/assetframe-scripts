@@ -12,7 +12,7 @@ Type=simple
 # and R2_BUCKET=assetframe-pro-dev. --- EDIT these three paths if you deploy elsewhere ---
 WorkingDirectory=/opt/assetframe-scripts-dev
 EnvironmentFile=/opt/assetframe-scripts-dev/.env
-ExecStart=/opt/assetframe-scripts-dev/.venv/bin/python -m scripts.scheduler.poller --interval 30
+ExecStart=/opt/assetframe-scripts-dev/.venv/bin/python -m scripts.scheduler.service.poller --interval 30
 # -------------------------------------------------------------------------------------------
 
 Restart=always

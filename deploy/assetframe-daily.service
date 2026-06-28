@@ -10,7 +10,7 @@ Type=oneshot
 # --- EDIT these three paths to match the VM (same as the poller unit) ---
 WorkingDirectory=/opt/assetframe-scripts
 EnvironmentFile=/opt/assetframe-scripts/.env
-ExecStart=/opt/assetframe-scripts/.venv/bin/python -m scripts.scheduler.scheduled_run
+ExecStart=/opt/assetframe-scripts/.venv/bin/python -m scripts.scheduler.service.scheduled_run
 # ------------------------------------------------------------------------
 
 Environment=PYTHONUNBUFFERED=1
