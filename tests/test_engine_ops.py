@@ -22,6 +22,8 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import engine_ops as E
+import db
+import commands
 import poller
 import scheduled_run
 
@@ -328,7 +330,7 @@ class DatabaseUrl(unittest.TestCase):
     def test_missing_database_url_raises_clear_configerror(self):
         # No DATABASE_URL in env AND no .env on disk -> ConfigError with a clear message.
         with mock.patch.dict(os.environ, {}, clear=True), \
-             mock.patch.object(E, "_load_dotenv_into_environ", lambda: None):
+             mock.patch.object(db, "_load_dotenv_into_environ", lambda: None):
             with self.assertRaises(E.ConfigError) as ctx:
                 E.database_url()
         self.assertIn("DATABASE_URL", str(ctx.exception))
@@ -341,7 +343,7 @@ class DatabaseUrl(unittest.TestCase):
 
     def test_connect_surfaces_configerror_when_missing(self):
         with mock.patch.dict(os.environ, {}, clear=True), \
-             mock.patch.object(E, "_load_dotenv_into_environ", lambda: None):
+             mock.patch.object(db, "_load_dotenv_into_environ", lambda: None):
             with self.assertRaises(E.ConfigError):
                 E.connect()
 
@@ -442,8 +444,8 @@ class CommandQueue(unittest.TestCase):
 
     def test_run_maintenance_invokes_publish_chain(self):
         c = FakeConn()
-        with mock.patch.object(E, "_FileLock", _NoLock), \
-             mock.patch.object(E, "_publish_chain", return_value=(True, None, "log tail")) as pc:
+        with mock.patch.object(commands, "_FileLock", _NoLock), \
+             mock.patch.object(commands, "_publish_chain", return_value=(True, None, "log tail")) as pc:
             ok, result, log, restart = E._cmd_run_maintenance(c, {})
         pc.assert_called_once()
         self.assertTrue(ok)
@@ -452,8 +454,8 @@ class CommandQueue(unittest.TestCase):
 
     def test_run_maintenance_reports_publish_failure(self):
         c = FakeConn()
-        with mock.patch.object(E, "_FileLock", _NoLock), \
-             mock.patch.object(E, "_publish_chain", return_value=(False, "publish exited 2", "log")):
+        with mock.patch.object(commands, "_FileLock", _NoLock), \
+             mock.patch.object(commands, "_publish_chain", return_value=(False, "publish exited 2", "log")):
             ok, result, _log, restart = E._cmd_run_maintenance(c, {})
         self.assertFalse(ok)
         self.assertIn("publish exited 2", result)
@@ -464,7 +466,7 @@ class CommandQueue(unittest.TestCase):
         import shutil
         d = Path(tempfile.mkdtemp())
         try:
-            with mock.patch.object(E, "ROOT", d):
+            with mock.patch.object(commands, "ROOT", d):
                 cfgp = d / "config" / "engine.json"
                 cfgp.parent.mkdir(parents=True, exist_ok=True)
                 # set_config now writes config/engine.json (the single runtime-settings file), NOT .env.
@@ -531,7 +533,7 @@ class CommandQueue(unittest.TestCase):
         try:
             (d / "ledger").mkdir()
             (d / "ledger" / "outcome_ledger.csv").write_text("report_id,hits\nAF-1,2\nAF-2,3\n", encoding="utf-8")
-            with mock.patch.object(E, "ROOT", d):
+            with mock.patch.object(commands, "ROOT", d):
                 ok, _result, _l, _r = E._cmd_reset_ledger(None, {})
             self.assertTrue(ok)
             self.assertEqual((d / "ledger" / "outcome_ledger.csv").read_text(encoding="utf-8").strip(), "report_id,hits")
@@ -547,7 +549,7 @@ class CommandQueue(unittest.TestCase):
             (d / "reports" / "2026-06-20" / "BTC" / "free.pdf").write_text("x", encoding="utf-8")
             (d / "runs").mkdir()
             (d / "runs" / "m.json").write_text("{}", encoding="utf-8")
-            with mock.patch.object(E, "ROOT", d), mock.patch.object(E, "_FileLock", _NoLock):
+            with mock.patch.object(commands, "ROOT", d), mock.patch.object(commands, "_FileLock", _NoLock):
                 ok, _result, _l, _r = E._cmd_clear_reports(None, {})
             self.assertTrue(ok)
             self.assertEqual(list((d / "reports").iterdir()), [])

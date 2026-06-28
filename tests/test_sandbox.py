@@ -26,6 +26,8 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import engine_ops as E
+import runner
+import commands
 
 
 def _reload_score_report():
@@ -148,7 +150,7 @@ class BacktestHandler(unittest.TestCase):
         self.assertIn("yyyy-mm-dd", msg.lower())
 
     def test_run_backtest_delegates_to_batch(self):
-        with mock.patch.object(E, "run_backtest_batch", return_value="backtest-X") as rbb:
+        with mock.patch.object(commands, "run_backtest_batch", return_value="backtest-X") as rbb:
             ok, msg, _l, _r = E._cmd_run_backtest(
                 None, {"assets": [" BTC ", "ES"], "as_of": "2026-06-17 12:00"})
         self.assertTrue(ok)
@@ -161,7 +163,7 @@ class BacktestHandler(unittest.TestCase):
         self.assertIn("backtest-X", msg)
 
     def test_run_backtest_passes_days_through(self):
-        with mock.patch.object(E, "run_backtest_batch", return_value="backtest-Y") as rbb:
+        with mock.patch.object(commands, "run_backtest_batch", return_value="backtest-Y") as rbb:
             ok, msg, _l, _r = E._cmd_run_backtest(
                 None, {"assets": ["btc"], "as_of": "2026-06-17 12:00", "days": 5})
         self.assertTrue(ok)
@@ -169,7 +171,7 @@ class BacktestHandler(unittest.TestCase):
         self.assertIn("5 days", msg)
 
     def test_run_backtest_clamps_days_to_max(self):
-        with mock.patch.object(E, "run_backtest_batch", return_value="backtest-Z") as rbb:
+        with mock.patch.object(commands, "run_backtest_batch", return_value="backtest-Z") as rbb:
             E._cmd_run_backtest(None, {"assets": ["btc"], "as_of": "2026-06-17 12:00", "days": 999})
         self.assertEqual(rbb.call_args.kwargs.get("days"), E.MAX_BACKTEST_DAYS)
 
@@ -226,10 +228,10 @@ class RunAndRecordSandbox(unittest.TestCase):
             captured["args"] = args
             return "done", {"generated": 1}, None, "log"
 
-        with mock.patch.object(E, "_FileLock", _NoLock), \
-             mock.patch.object(E, "_exec_run_daily", side_effect=_fake_exec), \
-             mock.patch.object(E, "_publish_chain") as pub, \
-             mock.patch.object(E, "_read_run_manifest", return_value=(None, None)):
+        with mock.patch.object(runner, "_FileLock", _NoLock), \
+             mock.patch.object(runner, "_exec_run_daily", side_effect=_fake_exec), \
+             mock.patch.object(runner, "_publish_chain") as pub, \
+             mock.patch.object(runner, "_read_run_manifest", return_value=(None, None)):
             run_id = E.run_and_record(_RecConn(), trigger="backtest",
                                       scope={"assets": ["btc"], "as_of": "2026-06-17 12:00"},
                                       sandbox=True)
@@ -239,14 +241,14 @@ class RunAndRecordSandbox(unittest.TestCase):
         self.assertTrue(run_id)
 
     def test_non_sandbox_still_publishes(self):
-        with mock.patch.object(E, "_FileLock", _NoLock), \
-             mock.patch.object(E, "_exec_run_daily",
+        with mock.patch.object(runner, "_FileLock", _NoLock), \
+             mock.patch.object(runner, "_exec_run_daily",
                                return_value=("done", {"generated": 1}, None, "log")), \
-             mock.patch.object(E, "_publish_chain", return_value=(True, None, "plog")) as pub, \
-             mock.patch.object(E, "_read_run_manifest", return_value=(None, None)):
+             mock.patch.object(runner, "_publish_chain", return_value=(True, None, "plog")) as pub, \
+             mock.patch.object(runner, "_read_run_manifest", return_value=(None, None)):
             captured_args = []
-            orig = E.scope_to_run_args
-            with mock.patch.object(E, "scope_to_run_args",
+            orig = runner.scope_to_run_args
+            with mock.patch.object(runner, "scope_to_run_args",
                                    side_effect=lambda s: captured_args.extend(orig(s)) or orig(s)):
                 E.run_and_record(_RecConn(), trigger="manual",
                                  scope={"assets": ["btc"]}, request_id="r1")
@@ -304,9 +306,9 @@ class BacktestBatchDays(unittest.TestCase):
             seen_as_ofs.append(args[idx + 1])
             return "done", {"generated": 1, "score": {"scored": 1}}, None, "log"
 
-        with mock.patch.object(E, "_FileLock", _NoLockBT), \
-             mock.patch.object(E, "_exec_run_daily", side_effect=_fake_exec), \
-             mock.patch.object(E, "_run_sync_backtest", return_value=(True, "synced 4")):
+        with mock.patch.object(runner, "_FileLock", _NoLockBT), \
+             mock.patch.object(runner, "_exec_run_daily", side_effect=_fake_exec), \
+             mock.patch.object(runner, "_run_sync_backtest", return_value=(True, "synced 4")):
             run_id = E.run_backtest_batch(_RecConnBT(), ["btc"], "2026-06-17 12:00", days=4)
         # 4 days -> 4 distinct, descending backdated as_ofs (day 0..3).
         self.assertEqual(seen_as_ofs,
@@ -333,18 +335,18 @@ class BacktestBatchDays(unittest.TestCase):
             calls.append(args)
             return "done", {"generated": 1, "score": {"scored": 1}}, None, "log"
 
-        with mock.patch.object(E, "_FileLock", _NoLockBT), \
-             mock.patch.object(E, "_exec_run_daily", side_effect=_fake_exec), \
-             mock.patch.object(E, "_run_sync_backtest", return_value=(True, "synced 1")) as sync:
+        with mock.patch.object(runner, "_FileLock", _NoLockBT), \
+             mock.patch.object(runner, "_exec_run_daily", side_effect=_fake_exec), \
+             mock.patch.object(runner, "_run_sync_backtest", return_value=(True, "synced 1")) as sync:
             E.run_backtest_batch(_RecConnBT(), ["btc"], "2026-06-17 12:00", days=1)
         self.assertEqual(len(calls), 1)            # exactly one day
         sync.assert_called_once()                  # sync still runs once for a single day
 
     def test_batch_syncs_once_after_all_days(self):
-        with mock.patch.object(E, "_FileLock", _NoLockBT), \
-             mock.patch.object(E, "_exec_run_daily",
+        with mock.patch.object(runner, "_FileLock", _NoLockBT), \
+             mock.patch.object(runner, "_exec_run_daily",
                                return_value=("done", {"score": {"scored": 2}}, None, "log")), \
-             mock.patch.object(E, "_run_sync_backtest", return_value=(True, "synced 6")) as sync:
+             mock.patch.object(runner, "_run_sync_backtest", return_value=(True, "synced 6")) as sync:
             E.run_backtest_batch(_RecConnBT(), ["btc"], "2026-06-17 12:00", days=3)
         sync.assert_called_once()                  # ONE sync for the whole 3-day batch
 
@@ -355,18 +357,18 @@ class BacktestBatchDays(unittest.TestCase):
             n_days.append(1)
             return "done", {}, None, "log"
 
-        with mock.patch.object(E, "_FileLock", _NoLockBT), \
-             mock.patch.object(E, "_exec_run_daily", side_effect=_fake_exec), \
-             mock.patch.object(E, "_run_sync_backtest", return_value=(True, "ok")):
+        with mock.patch.object(runner, "_FileLock", _NoLockBT), \
+             mock.patch.object(runner, "_exec_run_daily", side_effect=_fake_exec), \
+             mock.patch.object(runner, "_run_sync_backtest", return_value=(True, "ok")):
             E.run_backtest_batch(_RecConnBT(), ["btc"], "2026-06-17 12:00", days=999)
         self.assertEqual(len(n_days), E.MAX_BACKTEST_DAYS)
 
     def test_batch_records_one_backtest_run_row(self):
         c = _RecConnBT()
-        with mock.patch.object(E, "_FileLock", _NoLockBT), \
-             mock.patch.object(E, "_exec_run_daily",
+        with mock.patch.object(runner, "_FileLock", _NoLockBT), \
+             mock.patch.object(runner, "_exec_run_daily",
                                return_value=("done", {"score": {"scored": 1}}, None, "log")), \
-             mock.patch.object(E, "_run_sync_backtest", return_value=(True, "ok")):
+             mock.patch.object(runner, "_run_sync_backtest", return_value=(True, "ok")):
             E.run_backtest_batch(c, ["btc"], "2026-06-17 12:00", days=2)
         sql_log = " || ".join(s.lower() for s, _ in c.executed)
         # exactly one engine_runs INSERT with trigger 'backtest'.
@@ -495,7 +497,7 @@ class ClearSandboxHandler(unittest.TestCase):
             (d / "data" / "predictions" / "sim" / "1_predictions.json").write_text("{}", encoding="utf-8")
             (d / "ledger" / "outcome_ledger.csv").write_text("LIVE", encoding="utf-8")  # live ledger
             (d / "reports" / "2026-06-17" / "ES").mkdir(parents=True)                   # live report
-            with mock.patch.object(E, "ROOT", d), mock.patch.object(E, "_FileLock", _NoLockBT):
+            with mock.patch.object(commands, "ROOT", d), mock.patch.object(commands, "_FileLock", _NoLockBT):
                 ok, _result, _l, _r = E._cmd_clear_sandbox(None, {})
             self.assertTrue(ok)
             # sim trees emptied...
@@ -513,7 +515,7 @@ class ClearSandboxHandler(unittest.TestCase):
         import shutil
         d = Path(tempfile.mkdtemp())
         try:
-            with mock.patch.object(E, "ROOT", d), mock.patch.object(E, "_FileLock", _NoLockBT):
+            with mock.patch.object(commands, "ROOT", d), mock.patch.object(commands, "_FileLock", _NoLockBT):
                 ok, result, _l, _r = E._cmd_clear_sandbox(None, {})
             self.assertTrue(ok)
             self.assertIn("none present", result)
