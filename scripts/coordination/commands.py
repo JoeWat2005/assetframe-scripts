@@ -6,7 +6,7 @@ import psycopg
 
 from _paths import ROOT, SCRIPTS
 from locking import _FileLock, LOCK_PATH
-from db import _load_dotenv_into_environ, _empty_dir
+from db import _load_dotenv_into_environ, _empty_dir, EngineDB
 from wake import upstash_enabled, _upstash, HEARTBEAT_KEY, clear_wake
 from manifest import _tail, _read_run_manifest
 from runner import _publish_chain, run_backtest_batch, RUN_DAILY, MAX_BACKTEST_DAYS, SANDBOX_DIRS
@@ -60,44 +60,15 @@ _CONFIG_VALUE_VALIDATORS = {
 _KNOWN_POLLER_UNITS = {"assetframe-poller.service", "assetframe-poller-dev.service"}
 
 
+# Thin conn-first wrappers over EngineDB — SAME signatures, so the poller, the engine_ops façade,
+# and the tests are unchanged. The two-phase engine_commands claim/reap bodies now live on EngineDB
+# (claim_next_command unified with claim_next_request into EngineDB._claim_next).
 def claim_next_command(conn):
-    """Atomically claim the oldest queued engine_command, or None. Mirrors claim_next_request:
-    queued+cancel_requested rows are short-circuited to 'cancelled'; otherwise the oldest queued,
-    non-cancelled row is flipped to 'running' under FOR UPDATE SKIP LOCKED so two pollers never
-    claim the same row. Returns the claimed row dict, or None. Quietly returns None when the
-    engine_commands table doesn't exist yet (migration 1750000020000 not applied)."""
-    try:
-        with conn.transaction():
-            conn.execute(
-                "UPDATE engine_commands SET status = 'cancelled', finished_at = now() "
-                "WHERE id IN (SELECT id FROM engine_commands "
-                "             WHERE status = 'queued' AND cancel_requested = true "
-                "             FOR UPDATE SKIP LOCKED)")
-        with conn.transaction():
-            row = conn.execute(
-                "UPDATE engine_commands SET status = 'running', started_at = now() "
-                "WHERE id = (SELECT id FROM engine_commands "
-                "            WHERE status = 'queued' AND cancel_requested = false "
-                "            ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) "
-                "RETURNING *").fetchone()
-        return row
-    except psycopg.errors.UndefinedTable:
-        return None   # table not migrated yet — nothing to do (no log spam)
+    return EngineDB(conn).claim_next_command()
 
 
 def reap_stale_commands(conn):
-    """Called once on poller startup: mark any engine_commands left 'running' by a PREVIOUS process
-    (a restart command whose outcome-write was lost, or a crash) as 'failed', so the admin console
-    never shows a phantom 'running' command forever (claim_next_command only ever re-claims
-    'queued', so a stale 'running' row is otherwise never reconciled). Best-effort; a missing table
-    is a no-op."""
-    try:
-        conn.execute(
-            "UPDATE engine_commands SET status = 'failed', "
-            "  result = coalesce(result, 'interrupted (poller restarted)'), finished_at = now() "
-            "WHERE status = 'running'")
-    except Exception:
-        pass
+    return EngineDB(conn).reap_stale_commands()
 
 
 def run_command(conn, row):
