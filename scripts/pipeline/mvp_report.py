@@ -868,7 +868,14 @@ def run_qa(p):
             errs.append(f"banned language present: /{pat}/")
     for phrase, negation in NEGATED_ONLY.items():
         for m in re.finditer(phrase, blob):
-            ctx = blob[max(0, m.start() - 34):m.start()]
+            # Clear the phrase if a negation sits in its SHORT preceding window: up to 60 chars back
+            # (a legit "no representation ... is guaranteed" reaches ~40 chars), but NOT past a
+            # clause/sentence boundary (.!?;\n) — so a negation in a different clause ("...we do not
+            # expect a pullback; a rally is guaranteed") can't mask a real claim. The old fixed 34-char
+            # window missed legit negations (false-positive abort); an unbounded sentence would let a
+            # distant unrelated negation slip a claim through (compliance miss) — 60 + boundary splits the difference.
+            bound = max((blob.rfind(c, 0, m.start()) for c in ".!?;\n"), default=-1) + 1
+            ctx = blob[max(bound, m.start() - 60):m.start()]
             if not re.search(negation, ctx):
                 errs.append(f"unnegated '{phrase}' phrasing found")
     if RR_BAD.search(json.dumps(p, ensure_ascii=False)):

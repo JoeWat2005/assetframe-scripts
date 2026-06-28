@@ -49,7 +49,10 @@ def load_points(ledger_path, conf_version):
     with open(ledger_path, newline="", encoding="utf-8") as f:
         for r in csv.DictReader(f):
             cv = (r.get("conf_version") or "").strip()
-            if cv and conf_version is not None and cv != str(conf_version):
+            # When a specific conf_version is requested, a BLANK conf_version (freehand-era row) is
+            # treated as NON-matching and excluded — previously the `cv and` guard let blank rows slip
+            # through, contradicting the "only current-engine rows" calibration guarantee.
+            if conf_version is not None and cv != str(conf_version):
                 continue
             raw = (r.get("conf_raw") or r.get("confidence") or "").strip()
             try:

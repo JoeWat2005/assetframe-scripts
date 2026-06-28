@@ -1045,7 +1045,8 @@ def main():
             if irows:
                 _write_candles(ipath, irows, intraday=intra)
         blk = interval_block(iv, irows)
-        blk["csv"] = ipath.as_posix()
+        if irows:                              # only advertise a CSV path that was actually written
+            blk["csv"] = ipath.as_posix()
         intervals_meta[iv] = blk
 
     dc = [r["c"] for r in daily]

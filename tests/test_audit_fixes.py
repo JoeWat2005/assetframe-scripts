@@ -117,6 +117,32 @@ def test_twelvedata_rate_is_settable_and_validated():
     assert not v("-1") and not v("abc")
 
 
+# --------------------------------------------- Phase-2 CARE: sub-1 level keying at render precision
+def test_sub1_levels_not_merged_in_ledger_levels():
+    # 0.123443 and 0.123448 COLLAPSE at a fixed 4dp (both -> 0.1234) but are distinct at the render
+    # precision (_dp -> 5dp for sub-1). They must both survive — else a real level + setup is dropped.
+    by = {k: {"value": v} for k, v in {
+        "pp": 0.123443, "r1": 0.123448, "r2": 0.12400,
+        "tail_lo": 0.12000, "tail_hi": 0.13000, "swing_lo": 0.11900, "anchor": 0.123443}.items()}
+    _preds, ledger_levels = SP.build_predictions_spec(by, {}, "bullish")
+    assert 0.123443 in ledger_levels and 0.123448 in ledger_levels
+
+
+# --------------------------------------------- Phase-2 CARE: calibration excludes freehand-era rows
+def test_calibrate_excludes_blank_conf_version_when_version_requested(tmp_path):
+    import csv as _csv
+    import calibrate as CAL
+    p = tmp_path / "ledger.csv"
+    with open(p, "w", newline="", encoding="utf-8") as f:
+        w = _csv.writer(f)
+        w.writerow(["conf_version", "conf_raw", "hits", "misses", "horizon"])
+        w.writerow(["2", "70", "3", "1", "next_session"])     # current engine -> kept
+        w.writerow(["", "55", "2", "2", "next_session"])       # blank (freehand era) -> excluded at v=2
+    pts_v2 = CAL.load_points(str(p), conf_version=2)
+    assert len(pts_v2) == 1 and pts_v2[0][0] == 70.0
+    assert len(CAL.load_points(str(p), conf_version=None)) == 2   # no filter -> both
+
+
 # --------------------------------------------- _fmt_rr: a missing target reads "n/a", not "below 1.0x"
 def test_fmt_rr_missing_target_reads_na():
     s, _m1, m2 = SP._fmt_rr(100.0, 95.0, 110.0, None)     # t2 absent (e.g. long setup with no R1)

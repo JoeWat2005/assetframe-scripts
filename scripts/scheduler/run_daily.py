@@ -218,7 +218,10 @@ def parse_args(argv):
         else:
             print(f"ERROR: unknown argument {a}"); sys.exit(2)
         i += 1
-    o["workers"] = int(o["workers"])
+    try:
+        o["workers"] = int(o["workers"])
+    except (TypeError, ValueError):
+        print(f"ERROR: --workers must be an integer (got {o['workers']!r})"); sys.exit(2)
     if o["mode"] not in MODES:
         print(f"ERROR: --mode must be one of {MODES}"); sys.exit(2)
     return o

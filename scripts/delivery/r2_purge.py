@@ -9,10 +9,10 @@ Reads the same R2_* env vars as publish.py (and the engine repo's .env if presen
   R2_ACCOUNT_ID  R2_ACCESS_KEY_ID  R2_SECRET_ACCESS_KEY  R2_BUCKET
 
 Usage:
-  python scripts/r2_purge.py                 dry run — list every object, delete nothing
-  python scripts/r2_purge.py --yes           DELETE every object in the bucket
-  python scripts/r2_purge.py --prefix 2026-06-22/   only that edition date (dry run)
-  python scripts/r2_purge.py --prefix 2026-06-22/ --yes   delete just that date
+  python -m scripts.delivery.r2_purge                 dry run — list every object, delete nothing
+  python -m scripts.delivery.r2_purge --yes           DELETE every object in the bucket
+  python -m scripts.delivery.r2_purge --prefix 2026-06-22/   only that edition date (dry run)
+  python -m scripts.delivery.r2_purge --prefix 2026-06-22/ --yes   delete just that date
 """
 import argparse
 import os

@@ -5,7 +5,7 @@ into the web app: every file (free Snapshots AND Pro reports) is private in R2 (
 scripts/publish.py) and served only through the auth-gated /api/report route.
 
 Usage:
-  python scripts/export_content.py [--web web] [--include-dev]
+  python -m scripts.delivery.export_content [--web web] [--include-dev]
 
 Outputs:
   web/content/catalog.json        list of editions (metadata + /api/report asset paths)
@@ -129,7 +129,8 @@ def load_catalog(reports_dir, include_dev, since=None):
             continue
         try:
             m = json.loads(meta_path.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception as ex:
+            print(f"skipped {meta_path}: {ex}", file=sys.stderr)   # don't silently drop a corrupt edition
             continue
         d = meta_path.parent
         base = f"/api/report/{date}/{slug}"
@@ -343,7 +344,8 @@ def load_track_record(ledger_csv, pred_dir, scored_ids):
     for pf in sorted(pred_dir.glob("*_predictions.json")):
         try:
             p = json.loads(pf.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception as ex:
+            print(f"skipped {pf}: {ex}", file=sys.stderr)         # don't silently drop a corrupt prediction
             continue
         # Keep scored reports in the list too — their tracker flips from 0/n to hits/n.
         preds = p.get("predictions", [])

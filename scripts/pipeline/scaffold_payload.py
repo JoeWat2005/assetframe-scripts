@@ -268,12 +268,12 @@ def build_ladder(levels, setups):
     """All level ids except the bare anchor (kept out so it renders as LAST),
     ensuring every setup inval/t1/t2 id is present."""
     needed = set()
-    val_to_id = {round(l["value"], 4): l["id"] for l in levels}
+    val_to_id = {round(l["value"], _dp(l["value"])): l["id"] for l in levels}  # _dp: sub-1 levels keep 5dp
     for s in setups:
         for k in ("invalidation", "t1", "t2"):
             v = s.get(k)
             if v is not None:
-                needed.add(val_to_id.get(round(v, 4)))
+                needed.add(val_to_id.get(round(v, _dp(v))))
     ids = [l["id"] for l in levels if l["id"] != "anchor"]
     for nid in needed:
         if nid and nid not in ids:
@@ -329,7 +329,7 @@ def build_predictions_spec(by_id, brief, direction):
     # distinct ledger levels, all guaranteed to be canonical values
     seen, ledger_levels = set(), []
     for x in lv:
-        k = round(x, 4)
+        k = round(x, _dp(x))                  # _dp: don't merge distinct sub-1 levels (5dp)
         if k not in seen:
             seen.add(k); ledger_levels.append(x)
     return preds, ledger_levels

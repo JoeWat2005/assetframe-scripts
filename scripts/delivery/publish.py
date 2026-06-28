@@ -14,9 +14,9 @@ Set these environment variables (from the Cloudflare dashboard - see LAUNCH.md):
   R2_BUCKET             the private bucket name (e.g. assetframe-pro)
 
 Usage:
-  python scripts/publish.py            upload every edition's free + Pro files
-  python scripts/publish.py --dry-run  show what would upload, change nothing
-  python scripts/publish.py --date 2026-06-13   only that edition date
+  python -m scripts.delivery.publish            upload every edition's free + Pro files
+  python -m scripts.delivery.publish --dry-run  show what would upload, change nothing
+  python -m scripts.delivery.publish --date 2026-06-13   only that edition date
 
 Object keys mirror the paths /api/report requests: <date>/<slug>/{free,pro}.{html,pdf}
 and <date>/<slug>/preview.png
@@ -40,7 +40,7 @@ UPLOAD_FILES = {
 
 
 def _load_local_env():
-    """Populate missing R2_* vars from the engine repo's .env so `python scripts/publish.py`
+    """Populate missing R2_* vars from the engine repo's .env so `python -m scripts.delivery.publish`
     works without exporting them by hand."""
     envfile = ROOT / ".env"
     if not envfile.exists():
