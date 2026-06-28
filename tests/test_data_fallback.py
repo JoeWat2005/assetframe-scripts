@@ -14,7 +14,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import intraday as I
+import data_providers as I   # the fetch layer (monkeypatched here) lives in data_providers now
+import intraday              # freshness_block stays in intraday
 
 
 def setUpModule():
@@ -343,21 +344,21 @@ class TestFreshnessSessionProfile(unittest.TestCase):
     def test_in_session_provider_equity_flagged_stale(self):
         # provider equity (no currentTradingPeriod) that's in-session and 3h stale -> stale=True
         meta = {"instrumentType": "EQUITY", "currentTradingPeriod": None}
-        f = I.freshness_block(meta, self._rows(timedelta(hours=3)), now=self.NOW,
+        f = intraday.freshness_block(meta, self._rows(timedelta(hours=3)), now=self.NOW,
                               session_profile="us_equity_rth")
         self.assertEqual(f["market_state"], "open")
         self.assertTrue(f["stale"])
 
     def test_fresh_in_session_provider_equity_not_stale(self):
         meta = {"instrumentType": "EQUITY", "currentTradingPeriod": None}
-        f = I.freshness_block(meta, self._rows(timedelta(minutes=30)), now=self.NOW,
+        f = intraday.freshness_block(meta, self._rows(timedelta(minutes=30)), now=self.NOW,
                               session_profile="us_equity_rth")
         self.assertFalse(f["stale"])
 
     def test_without_profile_uses_lax_96h_rule(self):
         # no session_profile -> the prior lax behaviour: 3h-old in-session equity NOT flagged
         meta = {"instrumentType": "EQUITY", "currentTradingPeriod": None}
-        f = I.freshness_block(meta, self._rows(timedelta(hours=3)), now=self.NOW)
+        f = intraday.freshness_block(meta, self._rows(timedelta(hours=3)), now=self.NOW)
         self.assertFalse(f["stale"])
 
 
