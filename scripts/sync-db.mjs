@@ -245,20 +245,24 @@ async function syncOne(label, url) {
     try {
       await sql.query(
         `INSERT INTO scored_results (report_id, instrument, view, confidence, results, hits, misses, hit_rate, window_end,
-           conf_version, confidence_components, scored_cadence)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+           conf_version, confidence_components, scored_cadence, asset_class, pred_type, market_regime)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
          ON CONFLICT (report_id) DO UPDATE SET
            instrument=excluded.instrument, view=excluded.view, confidence=excluded.confidence,
            results=excluded.results, hits=excluded.hits, misses=excluded.misses,
            hit_rate=excluded.hit_rate, window_end=excluded.window_end,
            conf_version=excluded.conf_version, confidence_components=excluded.confidence_components,
-           scored_cadence=excluded.scored_cadence`,
+           scored_cadence=excluded.scored_cadence,
+           asset_class=excluded.asset_class, pred_type=excluded.pred_type, market_regime=excluded.market_regime`,
         [r.reportId, r.instrument, r.view, String(r.confidence), r.results,
          toInt(r.hits), toInt(r.misses), String(r.hitRate), r.windowEnd,
          // T12 (additive) — present only when export_content emits them.
          toInt(r.confVersion), toJson(r.confidenceComponents),
          // cadence (additive): daily | weekly | monthly, for per-period track-record grouping.
-         orNull(r.scoredCadence)]
+         orNull(r.scoredCadence),
+         // Denormalized scored-row taxonomy (additive) — the web track-record breakdowns group
+         // off these instead of the never-populated editions taxonomy columns.
+         orNull(r.assetClass), orNull(r.predType), orNull(r.regime)]
       );
       scoredCount++;
     } catch (err) {

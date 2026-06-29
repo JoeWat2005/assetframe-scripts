@@ -327,9 +327,12 @@ def load_track_record(ledger_csv, pred_dir, scored_ids):
                 "hits": r.get("hits", ""), "misses": r.get("misses", ""),
                 "hitRate": r.get("hit_rate_pct", ""), "windowEnd": r.get("window_end_utc", ""),
                 # Normalized taxonomy fields (carried where the ledger has them) so the DB
-                # path and JSON fallback expose the same shape.
+                # path and JSON fallback expose the same shape. These are denormalized onto
+                # scored_results (sync-db.mjs) so the web track-record breakdowns group off the
+                # scored row directly — the editions taxonomy columns are never populated.
                 "assetClass": _norm_asset_class(r.get("asset_class")),
-                "predType": r.get("pred_type", ""),
+                "predType": (r.get("pred_type") or "").strip(),
+                "regime": (r.get("market_regime") or "").strip(),
                 "scoredCadence": cadence_of(r.get("report_id")),
             })
         if len(rows) >= 10:
