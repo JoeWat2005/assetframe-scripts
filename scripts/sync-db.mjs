@@ -86,11 +86,10 @@ async function syncOne(label, url) {
       // (set via the web app) back to true.
       `INSERT INTO editions (id, report_date, slug, instrument, ticker, asset_class, status, risk, bias,
          data_quality, window_end, catalyst_status, has_pro, free_html_key, free_pdf_key, preview_key,
-         pro_html_key, pro_pdf_key,
-         asset_class_key, direction_view, prediction_type, market_regime, confidence_band, social_context,
+         pro_html_key, pro_pdf_key, confidence_band,
          hidden, report_id, scored_cadence, chart_intervals, forecast_window)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-         $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
+         $20,$21,$22,$23,$24)
        ON CONFLICT (id) DO UPDATE SET
          report_date=excluded.report_date, slug=excluded.slug, instrument=excluded.instrument,
          ticker=excluded.ticker, asset_class=excluded.asset_class, status=excluded.status,
@@ -98,17 +97,16 @@ async function syncOne(label, url) {
          window_end=excluded.window_end, catalyst_status=excluded.catalyst_status, has_pro=excluded.has_pro,
          free_html_key=excluded.free_html_key, free_pdf_key=excluded.free_pdf_key,
          preview_key=excluded.preview_key, pro_html_key=excluded.pro_html_key, pro_pdf_key=excluded.pro_pdf_key,
-         asset_class_key=excluded.asset_class_key, direction_view=excluded.direction_view,
-         prediction_type=excluded.prediction_type, market_regime=excluded.market_regime,
-         confidence_band=excluded.confidence_band, social_context=excluded.social_context,
+         confidence_band=excluded.confidence_band,
          report_id=excluded.report_id, scored_cadence=excluded.scored_cadence,
          chart_intervals=excluded.chart_intervals, forecast_window=excluded.forecast_window`,
       [id, e.date, e.slug, e.instrument, e.ticker, e.assetClass, e.status, e.risk, e.bias,
        toInt(e.dataQuality), e.windowEnd, e.catalystStatus, !!e.hasPro, e.freeHtml, e.freePdf, e.preview,
        e.hasPro ? `${e.date}/${e.slug}/pro.html` : null, e.hasPro ? `${e.date}/${e.slug}/pro.pdf` : null,
-       // T12 (additive) — pass through when export_content includes them, else null.
-       orNull(e.assetClassKey), orNull(e.directionView), orNull(e.predictionType),
-       orNull(e.marketRegime), orNull(e.confidenceBand), toJson(e.socialContext),
+       // confidence_band (kept — read by the new-editions notification cron). The other edition
+       // taxonomy columns (asset_class_key/direction_view/prediction_type/market_regime/social_context)
+       // were dropped in web migration 1750000031000 — scored-row taxonomy now lives on scored_results.
+       orNull(e.confidenceBand),
        // Approval gate (INSERT-only above). Default hidden when export omits the flag.
        e.hidden === false ? false : true,
        // Cadence + intervals (additive): report_id is the cadence-aware join key.
