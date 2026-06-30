@@ -345,7 +345,7 @@ class TestMemoryStage(unittest.TestCase):
 class TestScaffoldStage(unittest.TestCase):
     def test_predictions_and_payload_are_coherent(self):
         preds, pay = RESULT["preds"], RESULT["payload"]
-        self.assertEqual([p["id"] for p in preds["predictions"]], ["P1", "P2", "P3", "P4", "P5", "P6"])
+        self.assertEqual([p["id"] for p in preds["predictions"]], ["P1", "P2", "P3", "P4", "P6"])
         # the backdated daily report_id stamps the as-of minute and keeps BTC as the ticker suffix
         self.assertEqual(preds["report_id"], f"AF-{AS_OF_DT.strftime('%Y%m%d%H%M')}-BTC")
         self.assertEqual(preds["report_id"], pay["report_id"])
@@ -446,7 +446,7 @@ class TestScoreStage(unittest.TestCase):
         row = self._last_row()
         verdicts = dict(tok.split("=", 1) for tok in row["results"].split())
         # every typed prediction was graded (P1..P6 present); the manual P6 is unresolved -> MANUAL
-        self.assertEqual(set(verdicts), {"P1", "P2", "P3", "P4", "P5", "P6"})
+        self.assertEqual(set(verdicts), {"P1", "P2", "P3", "P4", "P6"})
         self.assertEqual(verdicts["P6"], "MANUAL")
         hits, misses = int(row["hits"]), int(row["misses"])
         graded = [v for v in verdicts.values() if v in ("Y", "N")]

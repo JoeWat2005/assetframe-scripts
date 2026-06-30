@@ -242,13 +242,17 @@ def build_ladder(levels, setups):
 
 
 def build_predictions_spec(by_id, brief, direction):
-    """P1..P6 mapped onto canonical levels; returns (predictions, ledger_levels).
+    """P1..P4 (+ optional manual P6) mapped onto canonical levels; returns (predictions, ledger_levels).
 
-    The DIRECTIONAL predictions (P1 settle-vs-PP, P3 R1-touch) are emitted only for a genuine
-    bull/bear view. A neutral/mixed brief gets ONLY the symmetric range/floor/ceiling predictions
-    (P2/P4/P5) — registering a directional bet the analyst never made would both misframe the
-    report and corrupt the track record / calibration. (Previously `bull = direction=="bullish"`
-    silently made neutral AND mixed bearish.)"""
+    The DIRECTIONAL predictions (P1 settle-vs-PP, P3 R1-touch) are emitted only for a genuine bull/bear
+    view; a neutral/mixed brief gets only the symmetric range/floor predictions (registering a
+    directional bet the analyst never made would misframe the report and corrupt the track record).
+
+    Two sharpenings vs the original gimme lattice (which made the hit-rate look high-but-uninformative):
+      - P2 uses the INNER (±1 ATR) band, so "stays in range" is a real ~50-60% bet, not the near-certain
+        ±2-ATR call it used to be (falls back to the outer band only if the inner band is absent).
+      - the old `no_close_above_after_touch` (P5) is DROPPED — it resolved No-trigger most days (R1 not
+        reached) and only diluted the public record with noise."""
     d = (direction or "").strip().lower()
     bull = d == "bullish"
     directional = d in ("bullish", "bearish")    # neutral/mixed -> no P1/P3
@@ -257,18 +261,22 @@ def build_predictions_spec(by_id, brief, direction):
     def v(_id):
         return by_id[_id]["value"] if _id in by_id else None
 
-    pp, tlo, thi = v("pp"), v("tail_lo"), v("tail_hi")
-    r1, r2, anchor = v("r1"), v("r2"), v("anchor")
+    pp, anchor = v("pp"), v("anchor")
+    r1 = v("r1")
     floor = v("swing_lo") or v("inner_lo") or v("s1")
+    # P2 range band: prefer the INNER (±1 ATR) band; fall back to the outer band only if absent.
+    lo2, hi2 = v("inner_lo"), v("inner_hi")
+    if lo2 is None or hi2 is None:
+        lo2, hi2 = v("tail_lo"), v("tail_hi")
 
     if pp is not None and directional:
         preds.append({"id": "P1", "type": "close_above", "level": pp, "expect": bool(bull),
                       "text": f"Session settles {'above' if bull else 'below'} PP {pp}"})
         lv.append(pp)
-    if tlo is not None and thi is not None:
-        preds.append({"id": "P2", "type": "range_inside", "lo": tlo, "hi": thi, "expect": True,
-                      "text": f"Stays inside the outer bands {tlo} - {thi}"})
-        lv += [tlo, thi]
+    if lo2 is not None and hi2 is not None:
+        preds.append({"id": "P2", "type": "range_inside", "lo": lo2, "hi": hi2, "expect": True,
+                      "text": f"Stays inside the expected daily range {lo2} - {hi2}"})
+        lv += [lo2, hi2]
     if r1 is not None and directional:
         preds.append({"id": "P3", "type": "touches", "level": r1, "expect": bool(bull),
                       "text": f"R1 {r1} is {'' if bull else 'not '}touched"})
@@ -277,11 +285,6 @@ def build_predictions_spec(by_id, brief, direction):
         preds.append({"id": "P4", "type": "no_close_below", "level": floor, "expect": True,
                       "text": f"No hourly close below the floor {floor}"})
         lv.append(floor)
-    if r1 is not None and r2 is not None:
-        preds.append({"id": "P5", "type": "no_close_above_after_touch", "touch": r1, "level": r2,
-                      "expect": True, "text": f"First touch of R1 {r1} does not close an hour "
-                      f"above R2 {r2} (NT if untouched)"})
-        lv.append(r2)
     manual = (brief or {}).get("manual_prediction")
     if manual and anchor is not None:
         preds.append({"id": "P6", "type": "manual", "note": manual})

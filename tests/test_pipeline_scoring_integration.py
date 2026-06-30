@@ -161,7 +161,7 @@ class TestThesisConfirmedChain(_ChainHarness):
         preds = self.scaffold(_ts(0))
         # scaffold emitted the V2 directional predictions for a genuine bear view
         ids = [p["id"] for p in preds["predictions"]]
-        self.assertEqual(ids, ["P1", "P2", "P3", "P4", "P5", "P6"])
+        self.assertEqual(ids, ["P1", "P2", "P3", "P4", "P6"])
 
         self.score()
         rows = self.ledger_rows()
@@ -169,10 +169,9 @@ class TestThesisConfirmedChain(_ChainHarness):
         row = rows[0]
         verdicts = self.results_map(row)
 
-        # bearish thesis HELD: settles below PP (Y), inside bands (Y), R1 untouched (Y),
-        # floor held (Y), R1 never touched so the after-touch test is NT, manual stays MANUAL.
-        self.assertEqual(verdicts, {"P1": "Y", "P2": "Y", "P3": "Y", "P4": "Y",
-                                    "P5": "NT", "P6": "MANUAL"})
+        # bearish thesis HELD: settles below PP (Y), inside the range band (Y), R1 untouched (Y),
+        # floor held (Y), manual stays MANUAL.
+        self.assertEqual(verdicts, {"P1": "Y", "P2": "Y", "P3": "Y", "P4": "Y", "P6": "MANUAL"})
         # NT + MANUAL are excluded from the hit rate denominator
         self.assertEqual(row["hits"], "4")
         self.assertEqual(row["misses"], "0")
@@ -210,14 +209,13 @@ class TestThesisBrokenChain(_ChainHarness):
         # The bearish-phrased predictions (expect=False on P1 settle-below-PP and P3 R1-not-
         # touched) FAIL when price rips up: each raw condition is True but expect is False -> N.
         self.assertEqual(verdicts["P1"], "N")   # settles ABOVE PP -> "below PP" false
-        self.assertEqual(verdicts["P2"], "N")   # breaks the outer band high
+        self.assertEqual(verdicts["P2"], "N")   # breaks the range band high
         self.assertEqual(verdicts["P3"], "N")   # R1 IS touched -> "not touched" false
         self.assertEqual(verdicts["P4"], "Y")   # floor still held
-        self.assertEqual(verdicts["P5"], "Y")   # first R1 touch did not close above R2
         self.assertEqual(verdicts["P6"], "MANUAL")
-        self.assertEqual(row["hits"], "2")
+        self.assertEqual(row["hits"], "1")
         self.assertEqual(row["misses"], "3")
-        self.assertEqual(row["hit_rate_pct"], "40.0")
+        self.assertEqual(row["hit_rate_pct"], "25.0")
 
 
 # ===========================================================================
@@ -236,7 +234,6 @@ class TestExpectFieldContract(_ChainHarness):
         self.assertIs(by_id["P3"]["expect"], False)   # "R1 not touched"
         self.assertIs(by_id["P2"]["expect"], True)
         self.assertIs(by_id["P4"]["expect"], True)
-        self.assertIs(by_id["P5"]["expect"], True)
         # P1 grades against a real bar set the SAME way score_report.main does it
         bars = S.load_bars(str(self.work / "data/candles/BTC_hourly.csv"),
                            S.parse_dt(preds["window_start_utc"]),
@@ -260,7 +257,7 @@ class TestNeutralBranchPropagation(_ChainHarness):
         ids = [p["id"] for p in preds["predictions"]]
         self.assertNotIn("P1", ids)
         self.assertNotIn("P3", ids)
-        self.assertEqual(ids, ["P2", "P4", "P5", "P6"])
+        self.assertEqual(ids, ["P2", "P4", "P6"])
         self.assertEqual(preds["taxonomy"]["direction"], "neutral")
 
         self.score()
@@ -268,7 +265,7 @@ class TestNeutralBranchPropagation(_ChainHarness):
         self.assertEqual(row["direction"], "neutral")
         self.assertEqual(row["market_regime"], "range")
         # only the symmetric predictions were graded
-        self.assertEqual(set(self.results_map(row)), {"P2", "P4", "P5", "P6"})
+        self.assertEqual(set(self.results_map(row)), {"P2", "P4", "P6"})
 
 
 # ===========================================================================
@@ -358,8 +355,8 @@ class TestManualPredictionRoundTrip(_ChainHarness):
         row = self.ledger_rows()[0]
         verdicts = self.results_map(row)
         self.assertEqual(verdicts["P6"], "Y")            # resolved, no longer MANUAL
-        # bullish bars already give P4,P5 = Y; P6=Y makes 3 hits / 3 misses
-        self.assertEqual(row["hits"], "3")
+        # bullish bars give P4 = Y; P6=Y makes 2 hits / 3 misses
+        self.assertEqual(row["hits"], "2")
         self.assertEqual(row["misses"], "3")
 
 
