@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 from _paths import ROOT, SCRIPTS
 from locking import _FileLock, LOCK_PATH
-from db import is_cancel_requested, _utcnow, RUN_TIMEOUT, _empty_dir, RunRecorder
+from db import is_cancel_requested, _utcnow, RUN_TIMEOUT, _empty_dir, RunRecorder, connect
 from manifest import scope_to_run_args, _read_run_manifest, summarize_manifest, _new_run_id, _tail
 
 RUN_DAILY = "scripts.scheduler.run.run_daily"            # spawned as `python -m <module>` (cwd = ROOT)
@@ -53,6 +53,30 @@ def _publish_chain(conn, request_id):
                 return False, f"{name} exited {p.returncode}: {_tail(out, 240)}"[:400], "\n".join(logs)
             warn = f"publish exited {p.returncode} — some R2 uploads failed; synced anyway, use Re-publish reports"[:240]
     return True, warn, "\n".join(logs)
+
+
+def _record_outcome(rec, status, results, errors, log_excerpt, *, conn=None, request_id=None):
+    """Write the terminal request + run rows on a FRESH connection. The `conn` held since the run
+    started can be a Neon socket that was silently dropped while idle during a multi-hour run (Neon
+    auto-suspends idle compute) — a write on it would hang forever and strand the run at 'running'
+    (the 'orphaned' bug). A new short-lived connection is guaranteed live AND resumes a suspended
+    Neon. Falls back to the held conn if a fresh connect fails. Order is load-bearing: finish the
+    REQUEST row before the RUN row (a stuck request has no reaper; see run_and_record)."""
+    try:
+        with connect() as fresh:
+            if request_id:
+                _finish_request(fresh, request_id, _request_status(status), rec.run_id, errors)
+            rec.finish(status, results, errors, log_excerpt, conn=fresh)
+        return
+    except Exception:
+        pass
+    # last resort: the held conn (hardened connect() keepalives bound any hang to ~60s).
+    try:
+        if request_id and conn is not None:
+            _finish_request(conn, request_id, _request_status(status), rec.run_id, errors)
+        rec.finish(status, results, errors, log_excerpt)
+    except Exception:
+        pass
 
 
 def run_and_record(conn, trigger, scope, request_id=None, sandbox=False):
@@ -136,8 +160,7 @@ def run_and_record(conn, trigger, scope, request_id=None, sandbox=False):
     # current_run_id self-heals via reap_stale_runs, but a generation_request stuck at 'running'
     # has no reaper — so it must be marked terminal before we release the run, else a crash between
     # the two writes would strand it forever. (Do NOT reorder these.)
-    _finish_request(conn, request_id, _request_status(status), run_id, errors)
-    rec.finish(status, results, errors, log_excerpt)
+    _record_outcome(rec, status, results, errors, log_excerpt, conn=conn, request_id=request_id)
     return run_id
 
 
@@ -247,7 +270,7 @@ def run_backtest_batch(conn, assets, as_of, days=1):
         "days": days, "assets": assets, "total_scored": total_scored,
         "day_runs": day_results,
     }
-    rec.finish(status, results, errors, log_excerpt)
+    _record_outcome(rec, status, results, errors, log_excerpt, conn=conn)
     return run_id
 
 

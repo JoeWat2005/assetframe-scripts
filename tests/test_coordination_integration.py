@@ -163,6 +163,32 @@ def _write_manifest(root, payload, date="2026-06-28"):
     return f
 
 
+# ================================================================ outcome recorded on a fresh conn
+class RecordOutcomeFreshConn(unittest.TestCase):
+    """The orphan-bug fix: the terminal outcome write uses a FRESH connection (the run-long conn can
+    be a Neon socket silently dropped while idle during a multi-hour run, on which the write would
+    hang forever -> the run is reaped as 'orphaned'). Falls back to the held conn only if a fresh
+    connect fails."""
+
+    def test_records_on_a_fresh_connection_not_the_held_one(self):
+        fresh, held = FakeConn(), FakeConn()
+        rec = db.RunRecorder(held, "daily-2026-06-30", "schedule", {"all_due": True})
+        with mock.patch.object(runner, "connect", return_value=fresh):
+            runner._record_outcome(rec, "done", {"generated": 1}, None, "log")
+        self.assertIsNotNone(fresh.first("update engine_runs set status"),
+                             "must record the outcome on the FRESH connection")
+        self.assertIsNone(held.first("update engine_runs set status"),
+                          "must NOT touch the stale held connection")
+
+    def test_falls_back_to_held_conn_when_fresh_connect_fails(self):
+        held = FakeConn()
+        rec = db.RunRecorder(held, "daily-2026-06-30", "schedule", {"all_due": True})
+        with mock.patch.object(runner, "connect", side_effect=RuntimeError("neon unreachable")):
+            runner._record_outcome(rec, "done", {"generated": 1}, None, "log", conn=held)
+        self.assertIsNotNone(held.first("update engine_runs set status"),
+                             "fallback must record on the held conn when a fresh connect fails")
+
+
 # ===================================================================== claim -> run -> record
 class ClaimRunRecord(unittest.TestCase):
     """db.claim_next_request -> runner.run_and_record (real), faking ONLY the Neon conn + the
@@ -205,6 +231,7 @@ class ClaimRunRecord(unittest.TestCase):
         self.assertIsNotNone(row, "claim should hand back the queued row")
         with mock.patch.object(runner, "LOCK_PATH", self.lock), \
              mock.patch.object(manifest, "ROOT", self.root), \
+             mock.patch.object(runner, "connect", return_value=conn), \
              mock.patch.object(runner.subprocess, "Popen", side_effect=_fake_popen), \
              mock.patch.object(runner.subprocess, "run", side_effect=_fake_run):
             run_id = runner.run_and_record(conn, trigger="manual", scope=row.get("scope"),

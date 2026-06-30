@@ -76,8 +76,21 @@ def connect():
     autocommit=True keeps each statement atomic, which is what heartbeat / claim /
     state-update want. claim_next_request manages its own explicit transaction for
     the SELECT ... FOR UPDATE SKIP LOCKED / UPDATE pair.
+
+    TCP keepalives are LOAD-BEARING. A connection held across a long run can sit idle for an hour+
+    while Neon auto-suspends the idle compute and silently drops the socket; without keepalives, a
+    write on that dead socket blocks FOREVER in recv() (the try/except around it cannot interrupt a
+    blocked syscall) — which strands a finished run at 'running' and gets it reaped as 'orphaned'
+    (the daily-run bug). keepalives surface the dead socket within ~60s so the write RAISES and the
+    caller can retry on a fresh conn; connect_timeout bounds the initial connect (which also RESUMES
+    a suspended Neon). These are plain TCP/libpq params — safe on both direct and pooled Neon URLs.
+    (statement_timeout is set per-statement where needed, not as a startup option the pooler may reject.)
     """
-    return psycopg.connect(database_url(), autocommit=True, row_factory=dict_row)
+    return psycopg.connect(
+        database_url(), autocommit=True, row_factory=dict_row,
+        connect_timeout=20,
+        keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=3,
+    )
 
 
 def _utcnow():
@@ -316,12 +329,15 @@ class RunRecorder:
             self.start_error = str(ex)
             return False
 
-    def finish(self, status, results, errors, log):
+    def finish(self, status, results, errors, log, conn=None):
         """Record the outcome: UPDATE status/results/errors/log_excerpt/finished_at and clear
         current_run_id. Best-effort — both writes are guarded so finish() never raises (the
-        callers wrapped these in try/except: pass)."""
+        callers wrapped these in try/except: pass). `conn` overrides self.conn so the caller can
+        record on a FRESH connection — the run-long self.conn may be a Neon socket that was dropped
+        while idle during a multi-hour run, on which this write would otherwise hang forever."""
+        c = conn or self.conn
         try:
-            self.conn.execute(
+            c.execute(
                 "UPDATE engine_runs SET status = %s, results = %s, errors = %s, "
                 "  log_excerpt = %s, finished_at = now() WHERE id = %s",
                 (status, json.dumps(results) if results else None, errors,
@@ -329,7 +345,7 @@ class RunRecorder:
         except Exception:
             pass
         try:
-            set_current_run(self.conn, None)
+            set_current_run(c, None)
         except Exception:
             pass
 
