@@ -254,3 +254,25 @@ def is_due(asset, now=None, holidays=None):
         return (d == ftd, f"{cls or 'market'} monthly ({d.isoformat()})" if d == ftd
                 else f"monthly: due {ftd.isoformat()}")
     return False, f"unknown cadence '{cadence}'"
+
+
+def next_due_at(asset, now=None, holidays=None, horizon_days=62):
+    """The next UTC datetime `asset` is scheduled to GENERATE — the 05:00 UTC pre-session slot on the
+    next day it is due (per is_due: cadence + weekends + holidays + market-closed) — or None if it is
+    not due within horizon_days. A forward PROJECTION of is_due (the same gate the daily timer runs at
+    05:00); it does NOT consider whether a report already exists for a slot. Disabled asset -> None."""
+    if not asset.get("enabled", True):
+        return None
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    holidays = holidays if holidays is not None else load_holidays()
+    base = now.date()
+    for i in range(horizon_days + 1):
+        d = base + timedelta(days=i)
+        slot = datetime(d.year, d.month, d.day, 5, 0, tzinfo=timezone.utc)  # 05:00 UTC pre-session run
+        if slot <= now:
+            continue
+        if is_due(asset, slot, holidays)[0]:
+            return slot
+    return None

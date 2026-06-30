@@ -25,6 +25,26 @@ def _asset(cls, cadence="daily", tz="UTC", enabled=True):
 SAT, SUN, MON = _at("2026-06-20 05:00"), _at("2026-06-21 05:00"), _at("2026-06-22 05:00")
 
 
+class TestNextDueAt(unittest.TestCase):
+    def test_crypto_next_is_the_next_0500_slot(self):
+        # crypto is always due -> next_due is simply the next 05:00 UTC slot after `now`
+        self.assertEqual(C.next_due_at(_asset("crypto"), _at("2026-06-20 03:00"), holidays={}), SAT)
+        self.assertEqual(C.next_due_at(_asset("crypto"), _at("2026-06-20 05:00"), holidays={}), SUN)  # slot passed
+
+    def test_fx_skips_the_weekend(self):
+        # from Saturday, an FX asset's next generation is Monday 05:00 (markets shut Sat/Sun)
+        self.assertEqual(C.next_due_at(_asset("fx"), _at("2026-06-20 03:00"), holidays={}), MON)
+
+    def test_disabled_is_none(self):
+        self.assertIsNone(C.next_due_at(_asset("fx", enabled=False), MON, holidays={}))
+
+    def test_slot_is_future_and_0500(self):
+        nd = C.next_due_at(_asset("equity", tz="America/New_York"), _at("2026-06-22 12:00"), holidays={})
+        self.assertIsNotNone(nd)
+        self.assertGreater(nd, _at("2026-06-22 12:00"))
+        self.assertEqual((nd.hour, nd.minute), (5, 0))
+
+
 class TestCrypto24x7(unittest.TestCase):
     def test_crypto_always_due(self):
         for when in (SAT, SUN, MON):

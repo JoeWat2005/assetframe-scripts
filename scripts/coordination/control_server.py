@@ -204,7 +204,7 @@ def job_status(jid):
 
 
 # ----------------------------------------------------------------------------- status
-def snapshot(conn, *, runs=8):
+def snapshot(conn, *, runs=8, requests=8, cmds=10):
     """Read-only engine status for /status and /events: heartbeat/online, paused, current run, and the
     most recent engine_runs. `online` mirrors the dashboard rule (heartbeat within 90s)."""
     out = {"now": _utcnow_iso(), "online": False, "paused": None, "current_run_id": None,
@@ -235,6 +235,52 @@ def snapshot(conn, *, runs=8):
             out["runs"].append(r)
     except Exception as ex:
         out["runs_error"] = str(ex)[:160]
+
+    # Generation queue (requests + history) — the dashboard's "Generation queue".
+    try:
+        rows = conn.execute(
+            "SELECT id, scope, status, coalesce(run_id,'') AS run_id, coalesce(requested_by,'') AS requested_by, "
+            "cancel_requested, created_at, started_at, finished_at, coalesce(error,'') AS error "
+            "FROM generation_requests ORDER BY created_at DESC LIMIT %s", (int(requests),)).fetchall()
+        out["requests"] = []
+        for r in (rows or []):
+            for k in ("created_at", "started_at", "finished_at"):
+                v = r.get(k)
+                if hasattr(v, "isoformat"):
+                    r[k] = v.isoformat()
+            out["requests"].append(r)
+    except Exception as ex:
+        out["requests_error"] = str(ex)[:160]
+
+    # Box command log — recent HTTP control jobs (ephemeral; since the control server started).
+    try:
+        with _JOBS_LOCK:
+            recent = sorted(_JOBS.values(), key=lambda j: j["created_at"], reverse=True)[:int(cmds)]
+        out["commands"] = [
+            {**j, "log": (j["log"][:600] if isinstance(j.get("log"), str) else j.get("log"))}
+            for j in recent
+        ]
+    except Exception as ex:
+        out["commands_error"] = str(ex)[:160]
+
+    # Schedule — for each enabled asset, when it next generates ("waiting for its next generation").
+    try:
+        import calendar_rules        # bare-name imports via the sys.path shim
+        import config_loader
+        nowdt = datetime.now(timezone.utc)
+        hol = calendar_rules.load_holidays()
+        sched = []
+        for a in config_loader.load_assets(enabled_only=True):
+            nd = calendar_rules.next_due_at(a, nowdt, hol)
+            sched.append({"id": a.get("id"), "asset_class": a.get("asset_class"),
+                          "cadence": a.get("cadence", "weekday"),
+                          "due_now": bool(calendar_rules.is_due(a, nowdt, hol)[0]),
+                          "next_due_at": nd.isoformat() if nd else None})
+        sched.sort(key=lambda s: (not s["due_now"], s["next_due_at"] or "9999"))
+        out["schedule"] = sched
+    except Exception as ex:
+        out["schedule_error"] = str(ex)[:160]
+
     return out
 
 
