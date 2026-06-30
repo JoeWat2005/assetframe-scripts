@@ -39,6 +39,9 @@ _CLAIM_STATUS_SCORE = {
     "single-source": 0.5, "unverified": 0.25, "stale": 0.3, "unavailable": 0.2,
 }
 _WEAK_STATUSES = ("single-source", "unverified", "stale")
+# Officially-licensed, commercial price feeds (mirror data_providers.PROVIDER_REGISTRY commercial=True).
+# A series from one of these is genuinely higher quality than the keyless Yahoo/CoinGecko fallback.
+_COMMERCIAL_PROVIDERS = ("twelvedata", "eodhd")
 
 
 def _clamp(x, lo=0.0, hi=1.0):
@@ -52,28 +55,34 @@ def _num(x):
 # --- measured data quality (replaces the hand-set data_quality_score) -------
 
 def compute_dq(analysis, claims=None, options_included=False):
-    """0..10 measured data-quality score from the engine analysis + claim sourcing."""
-    score = 7
+    """0..10 measured data-quality score from the engine analysis.
+
+    A clean, fully-backed report scores HIGH by default; points come off ONLY for real DATA defects.
+    Rationale (the old rubric capped at 7 and read "low" even when nothing was wrong):
+      - +1 for an officially-licensed feed (TwelveData/EODHD) over the keyless Yahoo/CoinGecko fallback.
+      - staleness is the engine's SESSION-AWARE `freshness.stale` flag — we do NOT ding a normally-old
+        overnight bar (these are next-session reports built outside market hours, so the last completed
+        bar is routinely hours old by design; the old flat `age > 180` penalty fired almost every time).
+      - thin news is NOT a data defect: `claims` are graded by the catalyst component, not here.
+    """
+    score = 8
     fr = analysis.get("freshness") or {}
-    if analysis.get("degraded"):
-        score -= 3
-    if fr.get("stale"):
-        score -= 2
-    age = _num(fr.get("age_minutes"))
-    if age is not None and age > 180:
-        score -= 1
-    warm = (analysis.get("windows") or {}).get("sma_warm_at_display_start") or {}
-    if warm and not all(warm.values()):
-        score -= 1
-    if analysis.get("errors"):
-        score -= 2
+    prov = analysis.get("provider") or {}
+    # credit a commercially-licensed price feed (genuinely higher quality than the keyless fallback).
+    if prov.get("hourly") in _COMMERCIAL_PROVIDERS or prov.get("daily") in _COMMERCIAL_PROVIDERS:
+        score += 1
     if options_included:
         score += 1
-    if claims:
-        unsupported = sum(1 for c in claims
-                          if (c.get("status") or "").lower() in _WEAK_STATUSES + ("unavailable",))
-        if unsupported >= 2:
-            score -= 1
+    # deductions — real defects only.
+    if analysis.get("degraded"):            # hourly fetch failed -> daily-only series
+        score -= 3
+    if fr.get("stale"):                     # session-aware staleness (not a flat overnight age)
+        score -= 2
+    if analysis.get("errors"):              # a recorded fetch error
+        score -= 2
+    warm = (analysis.get("windows") or {}).get("sma_warm_at_display_start") or {}
+    if warm and not all(warm.values()):     # an SMA/RSI window cold at the display start
+        score -= 1
     return max(0, min(10, score))
 
 

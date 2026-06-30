@@ -80,28 +80,36 @@ class TestDeterminism(unittest.TestCase):
 
 class TestComputeDQ(unittest.TestCase):
     def test_base_score(self):
-        self.assertEqual(C.compute_dq({}), 7)
+        # a clean report with no defects scores HIGH by default (the old rubric wrongly capped at 7).
+        self.assertEqual(C.compute_dq({}), 8)
+
+    def test_commercial_provider_bonus(self):
+        a = {"provider": {"hourly": "twelvedata", "daily": "twelvedata"}}
+        self.assertEqual(C.compute_dq(a), 9)   # 8 + 1 for the officially-licensed feed
 
     def test_degraded_stale_errors_floor(self):
         a = {"degraded": "daily_only", "freshness": {"stale": True}, "errors": {"x": 1}}
-        # 7 - 3 (degraded) - 2 (stale) - 2 (errors) = 0
-        self.assertEqual(C.compute_dq(a), 0)
+        # 8 - 3 (degraded) - 2 (stale) - 2 (errors) = 1
+        self.assertEqual(C.compute_dq(a), 1)
 
-    def test_old_age_subtracts(self):
+    def test_overnight_age_not_penalized(self):
+        # a normally-old overnight bar is NOT a defect (next-session reports build outside market
+        # hours); only the session-aware `stale` flag deducts, never a flat age threshold.
         a = {"freshness": {"age_minutes": 200}}
-        self.assertEqual(C.compute_dq(a), 6)
+        self.assertEqual(C.compute_dq(a), 8)
 
     def test_cold_indicators_subtract(self):
         a = {"windows": {"sma_warm_at_display_start": {"h20": True, "d200": False}}}
-        self.assertEqual(C.compute_dq(a), 6)
+        self.assertEqual(C.compute_dq(a), 7)
 
     def test_options_bonus_capped_at_10(self):
         a = _clean_analysis()
         self.assertLessEqual(C.compute_dq(a, options_included=True), 10)
 
-    def test_unsupported_claims_subtract(self):
+    def test_thin_news_not_a_data_defect(self):
+        # claims (news sourcing) are graded by the catalyst component, NOT the data-quality score.
         claims = [{"status": "unverified"}, {"status": "stale"}]
-        self.assertEqual(C.compute_dq({}, claims=claims), 6)
+        self.assertEqual(C.compute_dq({}, claims=claims), 8)
 
     def test_never_below_zero(self):
         a = {"degraded": True, "freshness": {"stale": True, "age_minutes": 999},
