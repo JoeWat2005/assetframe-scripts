@@ -225,7 +225,8 @@ def snapshot(conn, *, runs=8, requests=8, cmds=10):
         out["state_error"] = str(ex)[:160]
     try:
         rows = conn.execute(
-            "SELECT id, trigger, status, started_at, finished_at, errors FROM engine_runs "
+            "SELECT id, trigger, scope, status, results, started_at, finished_at, errors, "
+            "coalesce(log_excerpt, '') AS log_excerpt FROM engine_runs "
             "ORDER BY started_at DESC LIMIT %s", (int(runs),)).fetchall()
         for r in (rows or []):
             for k in ("started_at", "finished_at"):
