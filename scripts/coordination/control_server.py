@@ -27,12 +27,15 @@ ENV (per-checkout .env):
   ASSETFRAME_CONTROL_AUD      this env's Access application AUD
   ASSETFRAME_CONTROL_TOKEN    optional bearer required on POST /control
   ASSETFRAME_CONTROL_INSECURE =1 skips the Access-JWT check (DEV/LOCAL ONLY — never on the box)
+  ASSETFRAME_POLLER_UNIT      poller systemd unit checked for `online` (default assetframe-poller;
+                              the dev box sets assetframe-poller-dev)
 
 Run:  python -m scripts.coordination.control_server [--port N]
 """
 import argparse
 import hmac
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -62,6 +65,24 @@ ALLOWED = tuple(c for c in _commands.ALLOWED_COMMANDS if c not in _RESTART_ONLY)
 
 def _utcnow_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+# The box's OWN liveness signal for `online`: is the poller systemd unit active? This replaces the
+# Neon/Upstash heartbeat — so the poller no longer has to write a heartbeat (Upstash is rate-limiting
+# only) and `online` is correct even while idle (the Neon heartbeat is only refreshed on a ~30-min
+# safety sweep, so it can't be the source of truth). Unit name is per-env (prod vs dev) via env.
+_POLLER_UNIT = (os.environ.get("ASSETFRAME_POLLER_UNIT") or "assetframe-poller").strip()
+
+
+def _poller_active(unit=None):
+    """True iff the poller systemd unit reports `active`. Never raises — returns False if systemctl
+    is unavailable or the unit is down/unknown (so a stuck check shows offline, not a 500)."""
+    try:
+        r = subprocess.run(["systemctl", "is-active", unit or _POLLER_UNIT],
+                           capture_output=True, text=True, timeout=3)
+        return r.stdout.strip() == "active"
+    except Exception:
+        return False
 
 
 # ----------------------------------------------------------------------------- config
@@ -205,9 +226,10 @@ def job_status(jid):
 
 # ----------------------------------------------------------------------------- status
 def snapshot(conn, *, runs=8, requests=8, cmds=10):
-    """Read-only engine status for /status and /events: heartbeat/online, paused, current run, and the
-    most recent engine_runs. `online` mirrors the dashboard rule (heartbeat within 90s)."""
-    out = {"now": _utcnow_iso(), "online": False, "paused": None, "current_run_id": None,
+    """Read-only engine status for /status and /events: online, paused, current run, and the most
+    recent engine_runs. `online` = the poller systemd unit is active (the box's OWN liveness; no
+    heartbeat dependency). last_heartbeat_at is still surfaced from Neon for display only."""
+    out = {"now": _utcnow_iso(), "online": _poller_active(), "paused": None, "current_run_id": None,
            "last_heartbeat_at": None, "runs": []}
     try:
         st = conn.execute(
@@ -218,9 +240,6 @@ def snapshot(conn, *, runs=8, requests=8, cmds=10):
             out["last_heartbeat_at"] = hb.isoformat() if hasattr(hb, "isoformat") else hb
             out["paused"] = bool(st.get("automation_paused"))
             out["current_run_id"] = st.get("current_run_id")
-            if hb is not None:
-                age = (datetime.now(timezone.utc) - hb).total_seconds() if hasattr(hb, "isoformat") else 1e9
-                out["online"] = age < 90
     except Exception as ex:
         out["state_error"] = str(ex)[:160]
     try:

@@ -2,12 +2,13 @@
 """poller.py — the always-on engine loop (systemd service on the OCI VM).
 
 Each tick (default every 30s):
-  1. heartbeat_upstash()               -> write the heartbeat to Upstash (NO Neon), so the Neon
-                                          compute can auto-suspend (stay in free-tier hours).
-  2. only open Neon when there is work -> the web sets an Upstash wake flag on enqueue; plus a
+  1. only open Neon when there is work -> the web sets an Upstash WAKE flag on enqueue; plus a
                                           periodic Neon safety sweep. (No Upstash env? fall back to
-                                          opening Neon every tick — the original behaviour.)
-  3. when on Neon: heartbeat(conn) + drain every queued request (run_and_record, manual trigger).
+                                          opening Neon every tick — the original behaviour.) Upstash
+                                          now carries ONLY the wake flag (+ the web's rate-limiting);
+                                          the box's `online` is the control server's systemd
+                                          liveness check, so the poller writes no Upstash heartbeat.
+  2. when on Neon: heartbeat(conn) + drain every queued request (run_and_record, manual trigger).
 
 MANUAL requests run even when automation_paused is true — enqueuing a request is an
 explicit admin action, distinct from the scheduled timer (scheduled_run.py respects
@@ -90,8 +91,8 @@ def _drain_commands(conn):
 
 
 def tick(conn):
-    """One Neon service pass on an open connection: stamp the Neon heartbeat, drain admin commands,
-    then drain the generation queue. The cheap idle Upstash heartbeat + wake-check happens in
+    """One Neon service pass on an open connection: stamp the Neon heartbeat (display only), drain
+    admin commands, then drain the generation queue. The cheap idle wake-check happens in
     loop()/run_once() BEFORE Neon opens."""
     global _STOP
     engine_ops.heartbeat(conn)
@@ -106,9 +107,8 @@ def tick(conn):
 
 
 def run_once():
-    """A single pass (used by --once / tests): heartbeat Upstash, then check Neon once. Never
-    raises on a transient error, so --once is safe in any state."""
-    engine_ops.heartbeat_upstash()
+    """A single pass (used by --once / tests): check Neon once. Never raises on a transient error,
+    so --once is safe in any state."""
     try:
         with engine_ops.connect() as conn:
             engine_ops.clear_wake()
@@ -122,24 +122,20 @@ def run_once():
 
 
 def loop(interval):
-    """The long-lived poll loop. Each tick heartbeats Upstash (cheap, NO Neon) and only opens a
-    Neon connection when there is work (the web's wake flag), on a periodic safety sweep, or when
-    Upstash isn't configured (it then falls back to the original per-tick Neon polling). This lets
-    the Neon compute auto-suspend while idle. One bad tick is logged and skipped; only SIGTERM exits."""
-    using = "Upstash" if engine_ops.upstash_enabled() else "Neon (no Upstash env — per-tick polling)"
+    """The long-lived poll loop. Each tick only opens a Neon connection when there is work (the web's
+    Upstash wake flag), on a periodic safety sweep, or when Upstash isn't configured (it then falls
+    back to the original per-tick Neon polling). This lets the Neon compute auto-suspend while idle.
+    The box's `online` is the control server's systemd liveness check — the poller writes no Upstash
+    heartbeat. One bad tick is logged and skipped; only SIGTERM exits."""
+    using = "Upstash wake flag" if engine_ops.upstash_enabled() else "Neon (no Upstash env — per-tick polling)"
     _log(f"starting — interval={interval}s; work signal via {using}. "
          f"Manual requests run even when paused; the daily timer respects the pause flag.")
-    # Keep the box ONLINE during long runs: a background daemon refreshes the Upstash heartbeat every
-    # ~10s independently of the (single-threaded) tick, which can block for minutes on a run/backtest.
-    # It's a daemon thread, so it dies automatically when the process exits on SIGTERM.
-    engine_ops.start_heartbeat_daemon(interval=10)
     n = 0
     reaped = False
     while not _STOP:
         t0 = time.time()
         n += 1
         try:
-            engine_ops.heartbeat_upstash()   # cheap; returns None (no-op) when Upstash is unset
             do_neon = (not reaped                       # FORCE the first pass: run startup reap +
                        or not engine_ops.upstash_enabled()  # config-sync immediately on (re)start, not
                        or engine_ops.wake_pending()         # up to SAFETY_NEON_EVERY ticks (~30 min)
@@ -179,7 +175,6 @@ def loop(interval):
         end = time.time() + remaining
         while not _STOP and time.time() < end:
             time.sleep(max(0.0, min(1.0, end - time.time())))   # never negative across the clock edge
-    engine_ops.stop_heartbeat_daemon()
     _log("stopped cleanly")
     return 0
 

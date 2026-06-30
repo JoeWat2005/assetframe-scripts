@@ -114,36 +114,31 @@ class ServiceLog(unittest.TestCase):
 
 # ============================================================ poller.run_once
 class PollerRunOnce(unittest.TestCase):
-    def test_happy_path_heartbeats_clears_wake_and_returns_tick(self):
+    def test_happy_path_clears_wake_and_returns_tick(self):
         conn = FakeConn()
-        with mock.patch.object(poller.engine_ops, "heartbeat_upstash") as hb, \
-             mock.patch.object(poller.engine_ops, "connect", return_value=conn), \
+        with mock.patch.object(poller.engine_ops, "connect", return_value=conn), \
              mock.patch.object(poller.engine_ops, "clear_wake") as cw, \
              mock.patch.object(poller, "tick", return_value="run-77") as tk:
             rv = poller.run_once()
         self.assertEqual(rv, "run-77")
-        hb.assert_called_once()          # Upstash heartbeat happens FIRST (no Neon)
         cw.assert_called_once()          # wake flag cleared once on Neon
         tk.assert_called_once_with(conn)
 
     def test_configerror_is_reraised(self):
-        with mock.patch.object(poller.engine_ops, "heartbeat_upstash"), \
-             mock.patch.object(poller.engine_ops, "connect",
+        with mock.patch.object(poller.engine_ops, "connect",
                                side_effect=E.ConfigError("no DATABASE_URL")):
             with self.assertRaises(E.ConfigError):
                 poller.run_once()
 
     def test_transient_error_is_swallowed_returns_none(self):
         # A non-config error in the tick must NOT propagate (so --once is safe in any state).
-        with mock.patch.object(poller.engine_ops, "heartbeat_upstash"), \
-             mock.patch.object(poller.engine_ops, "connect",
+        with mock.patch.object(poller.engine_ops, "connect",
                                side_effect=RuntimeError("neon blip")):
             self.assertIsNone(poller.run_once())
 
     def test_tick_error_is_swallowed(self):
         conn = FakeConn()
-        with mock.patch.object(poller.engine_ops, "heartbeat_upstash"), \
-             mock.patch.object(poller.engine_ops, "connect", return_value=conn), \
+        with mock.patch.object(poller.engine_ops, "connect", return_value=conn), \
              mock.patch.object(poller.engine_ops, "clear_wake"), \
              mock.patch.object(poller, "tick", side_effect=ValueError("boom")):
             self.assertIsNone(poller.run_once())
@@ -253,9 +248,6 @@ class PollerLoop(unittest.TestCase):
 
         with _StopGuard(), \
              mock.patch.object(poller.engine_ops, "upstash_enabled", return_value=True), \
-             mock.patch.object(poller.engine_ops, "start_heartbeat_daemon") as sd, \
-             mock.patch.object(poller.engine_ops, "stop_heartbeat_daemon") as stop_d, \
-             mock.patch.object(poller.engine_ops, "heartbeat_upstash") as hb, \
              mock.patch.object(poller.engine_ops, "wake_pending", return_value=False), \
              mock.patch.object(poller.engine_ops, "connect", return_value=conn), \
              mock.patch.object(poller.engine_ops, "clear_wake") as cw, \
@@ -266,9 +258,6 @@ class PollerLoop(unittest.TestCase):
              mock.patch.object(poller, "tick", side_effect=_stopping_tick) as tk:
             rc = poller.loop(0)
         self.assertEqual(rc, 0)
-        sd.assert_called_once_with(interval=10)   # background heartbeat daemon started
-        stop_d.assert_called_once()               # and stopped on clean exit
-        hb.assert_called()                        # cheap Upstash heartbeat each tick
         cw.assert_called()                        # wake cleared when going to Neon
         rsc.assert_called_once()                  # FIRST pass: phantom-command reap
         sync.assert_called_once_with(conn)        # FIRST pass: rebuild assets from Neon
@@ -278,9 +267,6 @@ class PollerLoop(unittest.TestCase):
     def test_configerror_returns_1_fail_loud(self):
         with _StopGuard(), \
              mock.patch.object(poller.engine_ops, "upstash_enabled", return_value=True), \
-             mock.patch.object(poller.engine_ops, "start_heartbeat_daemon"), \
-             mock.patch.object(poller.engine_ops, "stop_heartbeat_daemon"), \
-             mock.patch.object(poller.engine_ops, "heartbeat_upstash"), \
              mock.patch.object(poller.engine_ops, "wake_pending", return_value=False), \
              mock.patch.object(poller.engine_ops, "connect",
                                side_effect=E.ConfigError("no DATABASE_URL")):
@@ -298,9 +284,6 @@ class PollerLoop(unittest.TestCase):
 
         with _StopGuard(), \
              mock.patch.object(poller.engine_ops, "upstash_enabled", return_value=True), \
-             mock.patch.object(poller.engine_ops, "start_heartbeat_daemon"), \
-             mock.patch.object(poller.engine_ops, "stop_heartbeat_daemon"), \
-             mock.patch.object(poller.engine_ops, "heartbeat_upstash"), \
              mock.patch.object(poller.engine_ops, "wake_pending", return_value=False), \
              mock.patch.object(poller.engine_ops, "connect", return_value=conn), \
              mock.patch.object(poller.engine_ops, "clear_wake"), \

@@ -6,6 +6,7 @@ import contextlib
 import os
 import sys
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -162,23 +163,32 @@ class TestAuthorize(unittest.TestCase):
 
 
 class TestSnapshot(unittest.TestCase):
-    def test_online_when_fresh_heartbeat(self):
+    def test_online_from_poller_liveness(self):
+        # online == the poller systemd unit is active (the box's own liveness), NOT heartbeat age.
         st = {"last_heartbeat_at": datetime.now(timezone.utc), "automation_paused": False,
               "current_run_id": "run-1"}
         runs = [{"id": "run-1", "trigger": "manual", "status": "running",
                  "started_at": datetime.now(timezone.utc), "finished_at": None, "errors": None}]
-        snap = CS.snapshot(FakeConn(state=st, runs=runs))
+        with mock.patch.object(CS, "_poller_active", return_value=True):
+            snap = CS.snapshot(FakeConn(state=st, runs=runs))
         self.assertTrue(snap["online"])
         self.assertEqual(snap["current_run_id"], "run-1")
         self.assertEqual(len(snap["runs"]), 1)
         self.assertIsInstance(snap["runs"][0]["started_at"], str)   # datetimes serialised for JSON
 
-    def test_offline_when_stale(self):
-        st = {"last_heartbeat_at": datetime.now(timezone.utc) - timedelta(minutes=10),
+    def test_offline_when_poller_down_despite_fresh_heartbeat(self):
+        # A fresh Neon heartbeat no longer implies online — the poller process must be active.
+        st = {"last_heartbeat_at": datetime.now(timezone.utc),
               "automation_paused": True, "current_run_id": None}
-        snap = CS.snapshot(FakeConn(state=st, runs=[]))
+        with mock.patch.object(CS, "_poller_active", return_value=False):
+            snap = CS.snapshot(FakeConn(state=st, runs=[]))
         self.assertFalse(snap["online"])
         self.assertTrue(snap["paused"])
+
+    def test_poller_active_never_raises_when_systemctl_missing(self):
+        # On a box without systemctl (or a denied/timed-out call) the check returns False, not a 500.
+        with mock.patch.object(CS.subprocess, "run", side_effect=FileNotFoundError("no systemctl")):
+            self.assertFalse(CS._poller_active("assetframe-poller"))
 
 
 class TestBearerFailClosed(unittest.TestCase):

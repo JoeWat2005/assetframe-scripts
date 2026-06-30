@@ -242,8 +242,9 @@ class _RunRecorder:
 
 
 def _fake_wake(stack):
-    """Enter all Upstash-network fakes on an ExitStack (the only network boundary)."""
-    for name in ("heartbeat_upstash", "clear_wake", "start_heartbeat_daemon", "stop_heartbeat_daemon"):
+    """Enter the Upstash-network fakes on an ExitStack (clear_wake is the only network call the
+    poller still makes each pass — the heartbeat write was retired)."""
+    for name in ("clear_wake",):
         stack.enter_context(mock.patch.object(poller.engine_ops, name))
     stack.enter_context(mock.patch.object(poller.engine_ops, "wake_pending", return_value=False))
     stack.enter_context(mock.patch.object(poller.engine_ops, "upstash_enabled", return_value=True))

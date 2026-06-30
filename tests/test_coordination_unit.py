@@ -1087,7 +1087,8 @@ class SnapshotErrors(unittest.TestCase):
         self.assertIn("runs_error", snap)
 
     def test_naive_heartbeat_does_not_crash_snapshot(self):
-        # a naive (tz-less) heartbeat triggers a TypeError on the age subtraction -> caught, offline.
+        # online is now the poller-liveness check (not heartbeat age), so a naive (tz-less) heartbeat
+        # is just surfaced for display and never crashes the snapshot.
         naive = datetime(2026, 6, 28, 0, 0, 0)
         c = FakeConn()
         c.results = {}
@@ -1098,9 +1099,11 @@ class SnapshotErrors(unittest.TestCase):
                     return FakeCursor([{"last_heartbeat_at": naive, "automation_paused": False,
                                         "current_run_id": None}])
                 return FakeCursor([])
-        snap = CS.snapshot(_C())
+        with mock.patch.object(CS, "_poller_active", return_value=False):
+            snap = CS.snapshot(_C())
         self.assertFalse(snap["online"])
-        self.assertIn("state_error", snap)
+        self.assertNotIn("state_error", snap)
+        self.assertEqual(snap["last_heartbeat_at"], "2026-06-28T00:00:00")
 
 
 class FacadeReexports(unittest.TestCase):
