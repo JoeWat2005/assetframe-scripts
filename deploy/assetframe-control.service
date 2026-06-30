@@ -30,7 +30,12 @@ KillSignal=SIGTERM
 TimeoutStopSec=15
 Environment=PYTHONUNBUFFERED=1
 
-# Light hardening: it only needs outbound HTTPS (Neon + the team JWKS) and to read the repo tree.
+# Runs as ROOT (no User=) on purpose: Restart engine / Deploy latest code call `systemctl restart
+# assetframe-poller` (+ self-restart) so they work even when the poller is DEAD. If you run this as a
+# non-root user instead, grant it `systemctl restart assetframe-poller assetframe-control` via sudoers
+# or polkit, else those two commands fail (everything else still works).
+# Light hardening: it needs outbound HTTPS (Neon + the team JWKS), to read+write the repo tree (deploy),
+# and dbus to systemd (restart). ProtectSystem=full keeps /usr,/boot,/etc read-only; /opt stays writable.
 NoNewPrivileges=true
 ProtectSystem=full
 PrivateTmp=false

@@ -55,10 +55,11 @@ def _fake_connect():
 
 
 class TestAllowList(unittest.TestCase):
-    def test_restart_commands_excluded(self):
-        # restart_poller/pull_latest need the POLLER process — never run from the control server
-        self.assertNotIn("restart_poller", CS.ALLOWED)
-        self.assertNotIn("pull_latest", CS.ALLOWED)
+    def test_restart_commands_now_servable(self):
+        # restart_poller/pull_latest run ON the control server (systemctl) so Restart/Deploy work even
+        # when the poller is dead — they're now part of the HTTP allow-list.
+        self.assertIn("restart_poller", CS.ALLOWED)
+        self.assertIn("pull_latest", CS.ALLOWED)
 
     def test_safe_commands_present(self):
         for c in ("service_check", "run_scoring", "set_config", "compute_due", "run_backtest"):
@@ -69,10 +70,29 @@ class TestSubmit(unittest.TestCase):
     def test_unknown_rejected(self):
         self.assertEqual(CS.submit_command("nope", {}, spawn=False)[0], 400)
 
-    def test_restart_rejected_here(self):
-        code, body = CS.submit_command("restart_poller", {}, spawn=False)
-        self.assertEqual(code, 400)
-        self.assertIn("poller path", body["error"])
+    def test_restart_poller_dispatches_to_systemctl(self):
+        # restart_poller is accepted (202) and, when run, restarts the poller UNIT (no Neon conn).
+        with mock.patch.object(CS, "_restart_unit", return_value=(True, "assetframe-poller restarted")) as ru:
+            code, body = CS.submit_command("restart_poller", {}, spawn=False)
+            self.assertEqual(code, 202)
+            CS._run_job(body["job_id"], "restart_poller", {})
+        ru.assert_called_once()
+        _, j = CS.job_status(body["job_id"])
+        self.assertEqual(j["status"], "done")
+        self.assertIn("restarted", j["result"])
+
+    def test_pull_latest_pulls_then_restarts_both(self):
+        with mock.patch.object(CS._commands, "_pull_code", return_value=(True, "pulled latest", "log")) as pc, \
+             mock.patch.object(CS, "_restart_unit", return_value=(True, "assetframe-poller restarted")) as ru, \
+             mock.patch.object(CS, "_schedule_self_restart") as sr:
+            code, body = CS.submit_command("pull_latest", {}, spawn=False)
+            self.assertEqual(code, 202)
+            CS._run_job(body["job_id"], "pull_latest", {})
+        pc.assert_called_once()
+        ru.assert_called_once()        # poller restarted
+        sr.assert_called_once()        # control server self-restart scheduled
+        _, j = CS.job_status(body["job_id"])
+        self.assertEqual(j["status"], "done")
 
     def test_args_must_be_object(self):
         self.assertEqual(CS.submit_command("service_check", [], spawn=False)[0], 400)

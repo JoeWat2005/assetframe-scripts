@@ -400,10 +400,9 @@ class ControlServerDispatch(unittest.TestCase):
         shutil.rmtree(self.root, ignore_errors=True)
 
     def test_submit_command_allowlist_contract(self):
-        # restart-only commands are refused here (they need the poller process).
+        # restart_poller/pull_latest are now servable here (the control server systemctl-restarts).
         code, body = CS.submit_command("pull_latest", {}, spawn=False)
-        self.assertEqual(code, 400)
-        self.assertIn("only via the poller", body["error"])
+        self.assertEqual(code, 202)
         # unknown verb refused.
         code, body = CS.submit_command("bogus", {}, spawn=False)
         self.assertEqual(code, 400)

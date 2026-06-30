@@ -27,8 +27,13 @@ ENV (per-checkout .env):
   ASSETFRAME_CONTROL_AUD      this env's Access application AUD
   ASSETFRAME_CONTROL_TOKEN    optional bearer required on POST /control
   ASSETFRAME_CONTROL_INSECURE =1 skips the Access-JWT check (DEV/LOCAL ONLY — never on the box)
-  ASSETFRAME_POLLER_UNIT      poller systemd unit checked for `online` (default assetframe-poller;
-                              the dev box sets assetframe-poller-dev)
+  ASSETFRAME_POLLER_UNIT      poller systemd unit checked for `online` + restarted by Restart/Deploy
+                              (default assetframe-poller; the dev box sets assetframe-poller-dev)
+  ASSETFRAME_CONTROL_UNIT     this server's own unit, self-restarted after a Deploy (default
+                              assetframe-control; the dev box sets assetframe-control-dev)
+
+Restart engine / Deploy latest code run HERE (systemctl), so they require this service to run as root
+(it does — no User= in the unit) or a sudoers/polkit grant for `systemctl restart`.
 
 Run:  python -m scripts.coordination.control_server [--port N]
 """
@@ -55,12 +60,13 @@ import commands as _commands      # ALLOWED_COMMANDS + run_command live here (fa
 from _service import service_log
 _log = service_log("control")
 
-# Commands that restart the POLLER process via a self-exit (see commands._cmd_restart_poller /
-# _cmd_pull_latest). They only work IN the poller, so the control server (a different process) does
-# NOT run them — they stay on the existing dashboard->Neon->poller path. Everything else is in-process
-# safe: each handler takes the cross-process run-lock, so it coordinates with the live poller.
-_RESTART_ONLY = {"restart_poller", "pull_latest"}
-ALLOWED = tuple(c for c in _commands.ALLOWED_COMMANDS if c not in _RESTART_ONLY)
+# restart_poller / pull_latest are executed BY THE CONTROL SERVER itself (see _run_control_restart):
+# it runs as root, so it can `systemctl restart assetframe-poller` even when the poller is DEAD — the
+# fix for the deadlock where the controls that restart the poller needed the poller alive. (The poller
+# self-exit handlers in commands.py stay as the Neon-queue fallback for when the control server is down.)
+# Everything else is dispatched to engine_ops.run_command on a Neon connection.
+_CONTROL_RESTART = {"restart_poller", "pull_latest"}
+ALLOWED = tuple(_commands.ALLOWED_COMMANDS)
 
 
 def _utcnow_iso():
@@ -72,6 +78,7 @@ def _utcnow_iso():
 # only) and `online` is correct even while idle (the Neon heartbeat is only refreshed on a ~30-min
 # safety sweep, so it can't be the source of truth). Unit name is per-env (prod vs dev) via env.
 _POLLER_UNIT = (os.environ.get("ASSETFRAME_POLLER_UNIT") or "assetframe-poller").strip()
+_CONTROL_UNIT = (os.environ.get("ASSETFRAME_CONTROL_UNIT") or "assetframe-control").strip()
 
 
 def _poller_active(unit=None):
@@ -83,6 +90,47 @@ def _poller_active(unit=None):
         return r.stdout.strip() == "active"
     except Exception:
         return False
+
+
+def _restart_unit(unit):
+    """`systemctl restart <unit>` — works because the control server runs as root. Returns
+    (ok, message); never raises (so a failed restart reports, not 500s)."""
+    try:
+        r = subprocess.run(["systemctl", "restart", unit], capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            return True, f"{unit} restarted"
+        return False, f"systemctl restart {unit} exited {r.returncode}: {(r.stderr or '').strip()[:200]}"
+    except Exception as ex:
+        return False, f"could not restart {unit}: {ex}"[:200]
+
+
+def _schedule_self_restart(delay=1.0):
+    """Bounce the control server itself AFTER the current response is sent (detached daemon), so a
+    deploy onto new code never drops the in-flight reply. systemd Restart=always relaunches it."""
+    def _later():
+        time.sleep(delay)
+        try:
+            subprocess.run(["systemctl", "restart", _CONTROL_UNIT], capture_output=True, text=True, timeout=30)
+        except Exception:
+            pass
+    threading.Thread(target=_later, name="assetframe-control-self-restart", daemon=True).start()
+
+
+def _run_control_restart(command):
+    """Handle restart_poller / pull_latest ON the control server (root -> systemctl), so Restart/Deploy
+    work even when the poller is DOWN. Returns the {status,result,log} shape _run_job records. No Neon
+    connection — a restart must work even when Neon is asleep."""
+    if command == "restart_poller":
+        ok, msg = _restart_unit(_POLLER_UNIT)
+        return {"status": "done" if ok else "failed", "result": msg, "log": None}
+    # pull_latest: pull + reinstall (shared git body), then restart the poller and self-restart control.
+    ok, msg, log = _commands._pull_code()
+    if not ok:
+        return {"status": "failed", "result": msg, "log": log}
+    rok, rmsg = _restart_unit(_POLLER_UNIT)
+    _schedule_self_restart()
+    return {"status": "done" if rok else "failed",
+            "result": f"{msg}; {rmsg}; control server restarting onto new code", "log": log}
 
 
 # ----------------------------------------------------------------------------- config
@@ -189,8 +237,12 @@ def _run_job(jid, command, args, runner=None):
     run_command = runner or engine_ops.run_command
     status, result, log = "failed", None, None
     try:
-        with engine_ops.connect() as conn:
-            res = run_command(conn, {"command": command, "args": args})
+        if command in _CONTROL_RESTART and runner is None:
+            # Restart/Deploy run ON the control server (root -> systemctl), no Neon conn needed.
+            res = _run_control_restart(command)
+        else:
+            with engine_ops.connect() as conn:
+                res = run_command(conn, {"command": command, "args": args})
         status = res.get("status", "failed")
         result = res.get("result")
         log = res.get("log")
@@ -207,9 +259,7 @@ def _run_job(jid, command, args, runner=None):
 def submit_command(command, args, *, spawn=True, runner=None):
     """Validate + start a command job. Returns (status_code, body_dict). Pure enough to unit-test."""
     if command not in ALLOWED:
-        why = ("restart_poller/pull_latest run only via the poller path"
-               if command in _RESTART_ONLY else "unknown command")
-        return 400, {"error": f"command '{command}' not allowed here ({why})", "allowed": list(ALLOWED)}
+        return 400, {"error": f"unknown command '{command}'", "allowed": list(ALLOWED)}
     if not isinstance(args, dict):
         return 400, {"error": "args must be an object"}
     jid = _new_job(command, args)

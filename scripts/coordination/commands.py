@@ -118,11 +118,11 @@ def _cmd_restart_poller(conn, args):
     return True, "restart requested — poller self-exits; systemd relaunches it", None, True
 
 
-def _cmd_pull_latest(conn, args):
-    """git fetch + git pull --ff-only + reinstall deps, then restart onto the new code. Mirrors the
-    CI deploy minus the sudo systemctl (replaced by the self-exit). --ff-only is non-destructive —
-    it refuses rather than rewrites if the tree diverged. Held under the run lock so it never pulls
-    mid-generation."""
+def _pull_code():
+    """git fetch + git pull --ff-only + reinstall deps, under the run lock. Returns (ok, msg, log).
+    SHARED by the poller self-exit handler (_cmd_pull_latest) AND the control server, which restarts
+    via systemctl AFTER this so Deploy works even when the poller is dead. --ff-only is non-destructive
+    — it refuses rather than rewrites if the tree diverged."""
     steps = [
         ["git", "fetch", "--prune", "origin"],
         ["git", "pull", "--ff-only"],
@@ -146,14 +146,24 @@ def _cmd_pull_latest(conn, args):
                 try:
                     p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=600)
                 except Exception as ex:
-                    return False, f"{cmd[0]} failed to launch: {ex}"[:300], "\n".join(logs), False
+                    return False, f"{cmd[0]} failed to launch: {ex}"[:300], "\n".join(logs)
                 out = ((p.stdout or "") + (p.stderr or "")).strip()
                 logs.append(f"$ {' '.join(cmd)} (rc={p.returncode})\n{_tail(out, 1500)}")
                 if p.returncode != 0:
-                    return False, f"{cmd[0]} exited {p.returncode}", "\n".join(logs), False
+                    return False, f"{cmd[0]} exited {p.returncode}", "\n".join(logs)
     except _FileLock.Locked:
-        return False, "another run is in progress — retry pull_latest shortly", None, False
-    return True, "pulled latest + reinstalled deps — restarting onto new code", "\n".join(logs), True
+        return False, "another run is in progress — retry pull_latest shortly", None
+    return True, "pulled latest + reinstalled deps", "\n".join(logs)
+
+
+def _cmd_pull_latest(conn, args):
+    """Poller-path deploy (the Neon-queue fallback): pull code, then self-exit so systemd relaunches
+    the poller onto it. The control server uses _pull_code() + systemctl directly (control_server
+    _run_control_restart) so Deploy works even when the poller is down."""
+    ok, msg, log = _pull_code()
+    if not ok:
+        return False, msg, log, False
+    return True, f"{msg} — restarting onto new code", log, True
 
 
 def _cmd_run_maintenance(conn, args):
